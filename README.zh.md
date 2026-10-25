@@ -15,14 +15,34 @@ DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实
 
 ## 装在哪里
 
-本仓库只维护一条产品线（`main`），同一个包同时支持两种界面。按你要装到哪里选：
+本仓库只维护一条产品线（`main`），同一个包同时支持两种界面。
 
-| 你要装在哪 | 安装方式 | 说明 |
-|---|---|---|
-| **DSH Web 界面** | `dsh plugin --profile web add dsh-unlimited-retry` | 推荐，装 npm 已发布版 |
-| **官方桌面客户端（Electron）** | 先打开桌面端一次、**完全退出**，再执行 `dsh plugin --profile desktop add dsh-unlimited-retry` | 然后重开桌面端生效。顺序不能省：未初始化的 desktop profile 会被拒绝，而不会退化成新建一个普通 CLI profile |
+| 你要装在哪 | 安装方式 |
+|---|---|
+| **DSH Web 界面** | 终端：`dsh plugin --profile web add dsh-unlimited-retry` |
+| **官方桌面客户端（Electron）** | **不用终端** —— 在桌面端会话里让 DSH 用内置的 `plugin_manager` 安装（见下） |
+
+### 官方桌面端：不要用终端命令
+
+桌面端读的是 **`desktop` profile**，而命令行**按设计拒绝**碰它：
+
+```
+error: profile "desktop" is managed exclusively by the Electron application
+```
+
+所以 `--profile web` 的命令装完，插件落在 `web` profile 里，桌面窗口一个字也读不到 —— 表现就是「设置里根本没有这一页，控制台也不报错」。
+
+**正确做法**：在桌面客户端的会话里直接说：
+
+> 请使用当前宿主内置的 `plugin_manager` 安装 `dsh-unlimited-retry`。先核对当前 profile 和是否已有同名插件；已有安装时先报告来源与版本。完成后告诉我安装结果及是否需要重启。
+
+`plugin_manager` 的作用域就是**当前 profile**（桌面端为 `desktop`），由宿主用它自带的包管理器完成安装与挂载登记 —— 不需要终端、不需要构造 cookie、不需要改写宿主管理的 profile 文件。要固定版本就写 `dsh-unlimited-retry@<版本>`。
+
+首次安装后如果设置里没出现，**完全退出客户端（含系统托盘）再重开**，而不是去堆叠另一份安装。
 
 > 为什么桌面端也能用：桌面端的 profile 就是 Web 模板（`base` + `web-app`），Electron 加载的是本地 Web UI 的 URL，因此 `dsh.client` 声明的面板在桌面端同样被 `client-modules` 装载。不需要另做一套客户端代码。
+>
+> 命令行 `dsh web` 用的是自己的 `web` profile；更新后重启宿主，并在浏览器 `Ctrl+F5`（Mac 为 `Cmd+Shift+R`）绕过缓存。
 
 ## 为什么要单独做一个插件
 
@@ -137,10 +157,10 @@ markerFile: null
 ```bash
 # Web 界面
 dsh plugin --profile web add dsh-unlimited-retry
-
-# 官方桌面客户端（先打开桌面端一次，然后完全退出它）
-dsh plugin --profile desktop add dsh-unlimited-retry
 ```
+
+官方桌面客户端请在桌面端会话里用内置的 `plugin_manager` 安装 ——
+见 [装在哪里](#装在哪里)。命令行按设计拒绝 `--profile desktop`。
 
 ### 从本仓库
 
@@ -157,6 +177,16 @@ dsh plugin --profile web add link:/绝对路径/dsh-unlimited-retry
 ```
 
 装好后打开 **设置 → 重试**。
+
+### 装完怎么自检
+
+装完看不到面板时，按下面两条分别确认宿主半区和客户端半区是否真的挂上了：
+
+1. **宿主半区**：`~/.dsh/adapters/unlimited-retry/mounted.json` 存在，且 `version` 就是你想装的那个版本；
+2. **客户端半区**：浏览器（或桌面端开发者工具）里能取到 `/plugins/??dsh-unlimited-retry/client.js&rev=…` 并返回 `200`。
+
+如果第 1 条通过、第 2 条失败，是客户端缓存问题——强制刷新（`Ctrl+F5` / Mac `Cmd+Shift+R`）。
+如果第 1 条就不存在，插件根本没挂上，回到安装那一步，先确认装的是哪个 profile。
 
 ## 目录结构
 

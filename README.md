@@ -22,14 +22,46 @@ the DSH Web UI and the official desktop client (Electron).**
 This repository maintains one product line (`main`). The same package supports
 both surfaces.
 
-| Surface | Install | Note |
-|---|---|---|
-| **DSH Web UI** | `dsh plugin --profile web add dsh-unlimited-retry` | Recommended; installs the published npm version |
-| **Official desktop client (Electron)** | Open the desktop client once, **fully quit it**, then run `dsh plugin --profile desktop add dsh-unlimited-retry` | Reopen the desktop client afterwards. The order matters: an uninitialized desktop profile is refused rather than being replaced by a fresh CLI profile |
+| Surface | Install |
+|---|---|
+| **DSH Web UI** | Terminal: `dsh plugin --profile web add dsh-unlimited-retry` |
+| **Official desktop client (Electron)** | **No terminal** — ask the desktop session to install it with the built-in `plugin_manager` (below) |
+
+### Desktop client: do not use a terminal command
+
+The desktop reads the **`desktop` profile**, and the CLI refuses to touch it by
+design:
+
+```
+error: profile "desktop" is managed exclusively by the Electron application
+```
+
+A `--profile web` install therefore lands in the `web` profile, and the desktop
+window reads none of it — the symptom is a Settings page that simply is not there,
+with nothing in the console.
+
+**Instead**, say this in a desktop-client session:
+
+> Please install `dsh-unlimited-retry` using this host's built-in
+> `plugin_manager`. Check the current profile and whether a package of that name
+> is already installed first; if it is, report its source and version. Then tell
+> me the result and whether a restart is needed.
+
+`plugin_manager` is scoped to the **current profile** (the desktop's is
+`desktop`) and uses the host's own package manager to install and register the
+plugin. No terminal, no cookie construction, no hand-editing a host-managed
+profile file. Pin a version by asking for `dsh-unlimited-retry@<version>`.
+
+If Settings does not show the page after a first install, **fully quit the client
+(including the tray) and reopen it** rather than stacking a second install.
 
 > Why the desktop works: the desktop profile *is* the Web template (`base` +
 > `web-app`), and Electron loads the local Web UI URL. The `dsh.client` panel is
 > therefore loaded by `client-modules` there too — no separate client build.
+>
+> The `dsh web` command line uses its own `web` profile: restart the host after an
+> update, then hard-reload the browser (`Ctrl+F5`, or `Cmd+Shift+R` on macOS) to
+> bypass the cache.
 
 ## Why a separate plugin
 
@@ -179,10 +211,11 @@ no jitter at all.
 ```bash
 # Web UI
 dsh plugin --profile web add dsh-unlimited-retry
-
-# Official desktop client (open it once first, then fully quit it)
-dsh plugin --profile desktop add dsh-unlimited-retry
 ```
+
+For the official desktop client, use the built-in `plugin_manager` from a desktop
+session instead — see [Where to install it](#where-to-install-it). The CLI refuses
+`--profile desktop` by design.
 
 ### From this repository
 
@@ -201,6 +234,20 @@ dsh plugin --profile web add link:/absolute/path/to/dsh-unlimited-retry
 ```
 
 Then open **Settings → Retry**.
+
+### Verifying a mount
+
+If the panel does not appear, check the host half and the client half separately:
+
+1. **Host half**: `~/.dsh/adapters/unlimited-retry/mounted.json` exists and its
+   `version` is the version you meant to install;
+2. **Client half**: `/plugins/??dsh-unlimited-retry/client.js&rev=…` returns `200`
+   in the browser (or the desktop's devtools).
+
+Host half present but client half missing is a cache problem — hard-reload
+(`Ctrl+F5`, or `Cmd+Shift+R` on macOS). If the host half is absent, the plugin
+never mounted: go back to the install step and confirm which profile you
+installed into.
 
 ## Layout
 
