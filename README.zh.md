@@ -59,12 +59,14 @@ initialDelayMs: 1000
 maxDelayMs: 60000
 jitterRatio: 0.2
 retryWithoutProviderPolicy: true
-excludeCodes: []         # 没有终止错误码
+excludeCodes: []         # 没有配置层面的终止码（ABORTED 始终终止）
 recordSessionEvents: true
 log: true
 ```
 
-**默认没有任何终止错误码——包括认证、配额、计费、上下文溢出。** 这就是这里「无限」的含义，并且挂载时会明确提示一次，让它是一个可见的决定，而不是一次无声的花费。唯一的约束是 `maxDelayMs`：一个永久失败的请求大约每分钟重试一次，一直持续下去。
+**默认没有任何「配置层面」的终止错误码——包括认证、配额、计费、上下文溢出。** 这就是这里「无限」的含义，并且挂载时会明确提示一次，让它是一个可见的决定，而不是一次无声的花费。唯一的约束是 `maxDelayMs`：一个永久失败的请求大约每分钟重试一次，一直持续下去。
+
+有一个错误码无论如何都终止：**`ABORTED`**。取消不是故障——要么这一轮被叫停，要么进程正在退出。`dsh-llm` 在 `signal.aborted || code === "ABORTED"` 这两种情况下都会给出 `aborted` 结束态，也就是说 `ABORTED` 可能在循环自身的 signal 还没翻转时就到达这里。重试它等于把你刚刚取消的工作重新跑一遍，所以这条判断放在 `excludeCodes` 之前，且清空该列表也不会让它恢复。两侧匹配都忽略大小写并去除空白，因此 `Aborted`、`ABORTED`、` aborted ` 是同一个码。
 
 两种收口方式：
 
@@ -108,6 +110,22 @@ provider 要求的延迟（`providerRetryAfterMs`）会被尊重，但同样被 
 组合里没有准入服务时，写操作返回 `403`；行不可寻址或没有 `configEditor` 时返回 `409`。请求体上限 8 KiB，且必须是 `application/json`。
 
 这些路由只是给面板用的便利通道。重试行为本身从不依赖它们，所以 headless 或 ACP 组合只挂策略、完全没有路由。
+
+### 任何模式、任何组合
+
+重试策略是宿主插件，因此对同一个 profile 启动的每个会话、每种 preset 都生效，
+在没有 Web 服务器的 headless 或 ACP 组合里同样生效。插件只注册一个
+`agent/request-error` 监听器，别的不需要；面板是一个独立、可选的界面。
+
+以下都是按真实契约验证过的，而不是只靠桩：
+
+- 真实 Cordis 分发器，同一组合下的兄弟 agent 各自持有自己的阶梯；
+- 真实 session-projection 服务，包括从会话日志回放的重建 cell；
+- 挂载在 preset 作用域内的 agent（监听器带作用域标记）；
+- 没有 `webServer`、没有 `connection`、没有 `configEditor` 的组合，仍然正常重试，只是没有面板。
+
+它**不会**做的事：重试 provider 适配器根本没接纳的请求，或失败发生在 agent 循环拿到
+turn 之前的请求——那些根本不会到达 `agent/request-error`。`ABORTED` 是设计上明确终止的。
 
 ## 验证
 

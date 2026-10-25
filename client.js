@@ -89,6 +89,7 @@ window.__ModuleLoader__.load({
       excludePreset: "Use recommended set",
       excludeClear: "Clear all",
       excludeUnknown: "Enter a failure code first.",
+      alwaysTerminal: "{codes} always stay terminal: a cancellation is not a fault, so it is never retried.",
       excludeDuplicate: "{code} is already listed.",
       distributions: "Breakdown",
       byCode: "By failure code",
@@ -177,6 +178,7 @@ window.__ModuleLoader__.load({
       excludePreset: "使用推荐集合",
       excludeClear: "全部清除",
       excludeUnknown: "请先输入错误码。",
+      alwaysTerminal: "{codes} 始终终止：取消不是故障，因此永不重试。",
       excludeDuplicate: "已经包含 {code}。",
       distributions: "分布",
       byCode: "按错误码",
@@ -1022,6 +1024,10 @@ window.__ModuleLoader__.load({
                 React.createElement("div", { key: "h", className: "duFieldHint" }, t("excludeHint")),
               ]),
               React.createElement("div", { key: "b", className: "duFieldBody", style: { flexDirection: "column", alignItems: "stretch" } }, [
+                React.createElement("div", { key: "locked", className: "duEmptyLine" },
+                  fmt.fill(t("alwaysTerminal"), {
+                    codes: (data.alwaysTerminalCodes ?? []).join(", "),
+                  })),
                 excluded.length === 0
                   ? React.createElement("div", { key: "empty", className: "duEmptyLine" }, t("excludeEmpty"))
                   : React.createElement("div", { key: "chips", className: "duChips" }, excluded.map((code) =>
@@ -1047,6 +1053,7 @@ window.__ModuleLoader__.load({
                     key: "input",
                     className: "duInput",
                     type: "text",
+                    list: "du-code-options",
                     "aria-label": t("excludeAdd"),
                     placeholder: t("excludePlaceholder"),
                     disabled: !writable || pending,
@@ -1061,6 +1068,11 @@ window.__ModuleLoader__.load({
                       addCode();
                     },
                   }),
+                  // Suggested from the codes the Harness itself can produce; the
+                  // field stays free text because providers add their own.
+                  React.createElement("datalist", { key: "codes", id: "du-code-options" },
+                    (data.knownFailureCodes ?? []).map((code) =>
+                      React.createElement("option", { key: code, value: code }))),
                   React.createElement("button", {
                     key: "add-btn",
                     type: "button",

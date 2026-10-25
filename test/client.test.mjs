@@ -355,6 +355,8 @@ function sampleSnapshot() {
     capabilities: { unlimited: true, retriesEveryCode: false, canWriteConfig: true, canReset: true },
     ladder: [{ attempt: 1, delayMs: 1000, clamped: false }, { attempt: 2, delayMs: 2000, clamped: false }],
     recommendedExclude: ["AUTH", "QUOTA", "CONTEXT_OVERFLOW"],
+    knownFailureCodes: ["ABORTED", "RATE_LIMIT", "TIMEOUT", "TRANSPORT"],
+    alwaysTerminalCodes: ["ABORTED"],
     stats: {
       totalRetries: 12,
       activeWaits: 1,
@@ -399,4 +401,52 @@ test("a reload right after a save is not reported as an outage", async () => {
   assert.doesNotMatch(html, /did not answer/, "one failed poll is not an outage");
   // The data itself is still on screen, from the previous successful poll.
   assert.match(html, /Model request retry/);
+});
+
+test("the panel explains the always-terminal rule instead of hiding it", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({
+      status: "ready",
+      data: sampleSnapshot(),
+      error: null,
+      errorCode: null,
+      fetchedAt: Date.now(),
+      everLoaded: true,
+      consecutiveFailures: 0,
+    }),
+  }));
+  // A rule the operator cannot override must be visible, not a mystery.
+  assert.match(html, /ABORTED always stay terminal/);
+  assert.match(html, /cancellation is not a fault/);
+});
+
+test("the code input offers the real Harness vocabulary as suggestions", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({
+      status: "ready",
+      data: sampleSnapshot(),
+      error: null,
+      errorCode: null,
+      fetchedAt: Date.now(),
+      everLoaded: true,
+      consecutiveFailures: 0,
+    }),
+  }));
+  assert.match(html, /<datalist[^>]*id="du-code-options"/);
+  assert.match(html, /value="TIMEOUT"/);
+  assert.match(html, /value="RATE_LIMIT"/);
 });

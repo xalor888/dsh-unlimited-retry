@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "2.0.0";
+const PLUGIN_VERSION = "2.1.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -58,10 +58,59 @@ const RECENT_LIMIT = 50;
 const LADDER_ROWS = 8;
 
 /**
+ * Codes that are terminal no matter how the plugin is configured.
+ *
+ * `ABORTED` is not a failure to recover from: it means the request was
+ * deliberately cancelled — the turn was stopped, the process is shutting down,
+ * or the adapter gave up on a cancelled signal. `dsh-llm` produces this finish
+ * whenever `signal.aborted || failure.code === "ABORTED"`, and the second half
+ * of that test means an `ABORTED` failure can reach this listener with the loop
+ * signal still live. Retrying it would resurrect work the user just cancelled
+ * (and, with an unbounded budget, resurrect it forever), so the check is applied
+ * before the configured `excludeCodes`: clearing that list must not re-enable
+ * retrying a cancel.
+ */
+const ALWAYS_TERMINAL_CODES = Object.freeze(["ABORTED"]);
+
+/** Fast membership test for {@link ALWAYS_TERMINAL_CODES}. */
+const ALWAYS_TERMINAL = new Set(ALWAYS_TERMINAL_CODES);
+
+/**
+ * Every failure code the Harness itself can produce, for the panel's picker.
+ *
+ * These come from the shipped `dsh-llm` layer rather than from guesswork, so the
+ * UI can offer the real vocabulary instead of asking the operator to spell a
+ * constant from memory. Providers still surface their own codes, which is why
+ * the picker also accepts free text.
+ */
+const KNOWN_FAILURE_CODES = Object.freeze([
+  "ABORTED",
+  "ACCOUNT_QUOTA",
+  "CONTEXT_WINDOW_EXCEEDED",
+  "EMPTY_RESPONSE",
+  "IMAGE_OFFLOAD_REQUIRED",
+  "INVALID_CREDENTIAL",
+  "INVALID_REQUEST",
+  "NO_ADAPTER",
+  "QUOTA",
+  "RATE_LIMIT",
+  "REGISTRATION_DISPOSED",
+  "SERVER",
+  "TIMEOUT",
+  "TRANSPORT",
+  "UNKNOWN",
+]);
+
+/**
  * Codes where a retry re-sends a request that fails identically, so an
  * unbounded budget is pure spend. NOT terminal by default — this is the
  * recommended one-click preset for `excludeCodes`, and mirrors the permanent
  * sets other recovery layers already judge terminal.
+ *
+ * `IMAGE_OFFLOAD_REQUIRED` is deliberately absent: `dsh-compaction-image-offload`
+ * recovers it by shrinking the request, and it registers ahead of this plugin.
+ * If it declines, retrying is the correct next move because the retry path
+ * re-prepares the request.
  */
 const RECOMMENDED_EXCLUDE = Object.freeze([
   "AUTH",
@@ -155,10 +204,16 @@ async function loadConfigSchema() {
 }
 
 /**
- * Resolve schemastery from the profile first, then from the plain specifier.
- * @returns the schemastery default export, or undefined.
+ * Resolve one package from the profile first, then from the plain specifier.
+ *
+ * A `link:`-installed bundle resolves modules from its real workspace path,
+ * which has a different ancestor chain than the profile, so the bare specifier
+ * can fail for a package the Harness definitely ships. Anchoring on
+ * `DSH_PROFILE_DIR` makes both installation shapes work.
+ * @param specifier - the package to resolve.
+ * @returns the imported namespace, or undefined when it cannot be resolved.
  */
-async function importSchemastery() {
+async function importFromProfile(specifier) {
   const anchors = [
     process.env.DSH_PROFILE_DIR,
     process.env.DSH_HOME === undefined ? undefined : `${process.env.DSH_HOME}/profiles/${process.env.DSH_PROFILE ?? "web"}`,
@@ -167,19 +222,39 @@ async function importSchemastery() {
     try {
       const { createRequire } = await import("node:module");
       const { join } = await import("node:path");
-      const resolved = createRequire(join(anchor, "noop.js")).resolve("@deepseek-ai/schemastery");
-      const module = await import(pathToSpecifier(resolved));
-      if (typeof module.default?.object === "function") return module.default;
+      const resolved = createRequire(join(anchor, "noop.js")).resolve(specifier);
+      return await import(pathToSpecifier(resolved));
     } catch {
       /* try the next anchor */
     }
   }
   try {
-    const module = await import("@deepseek-ai/schemastery");
-    return module.default;
+    return await import(specifier);
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Resolve schemastery, used for the panel-editable Config schema.
+ * @returns the schemastery default export, or undefined.
+ */
+async function importSchemastery() {
+  const module = await importFromProfile("@deepseek-ai/schemastery");
+  return typeof module?.default?.object === "function" ? module.default : undefined;
+}
+
+/**
+ * Resolve `zod`, used for the projection state schema.
+ *
+ * This must be the real zod: the projection registry validates a replayed cell
+ * with `stateSchema.parse`, which schemastery does not implement.
+ * @returns the zod namespace, or undefined.
+ */
+async function importZod() {
+  const module = await importFromProfile("zod");
+  const z = module?.z ?? module?.default?.z ?? module?.default;
+  return typeof z?.object === "function" ? { z } : undefined;
 }
 
 /** Convert an absolute filesystem path into an importable URL specifier. */
@@ -187,6 +262,23 @@ function pathToSpecifier(path) {
   return `file://${path.split("\\").join("/").replace(/^([^/])/, "/$1")}`;
 }
 
+
+/**
+ * Projection state schema for one retry series.
+ *
+ * The registry validates a replayed cell with `stateSchema.parse`, so this must
+ * be a real zod schema: a hand-rolled `{ parse }` object registers fine and then
+ * throws on the first resumed session. Building it once at module scope keeps
+ * `apply()` synchronous and avoids per-mount construction.
+ */
+const CHAIN_SCHEMA = await (async () => {
+  const zod = await importZod();
+  if (zod === undefined) return undefined;
+  return zod.z.object({
+    attempt: zod.z.number().int().nonnegative().default(0),
+    retryId: zod.z.string().optional(),
+  });
+})();
 
 /** The schema export is optional; absence only removes the advertised form. */
 export const Config = await loadConfigSchema();
@@ -198,6 +290,32 @@ function finite(value, fallback) {
 
 function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Canonical form of a failure code, used for every membership test.
+ *
+ * Failure codes are compared, not displayed, here — the raw code is what gets
+ * recorded in the session events and shown in the panel. Case and surrounding
+ * whitespace are normalised because a provider adapter is free to surface
+ * `Aborted` or ` transaction ` and the guard must still recognise it; a guard
+ * that only matches one spelling is a bug waiting for a second vendor.
+ * @param value - the raw `failure.code`.
+ * @returns the canonical uppercase, trimmed code, or undefined when absent.
+ */
+function canonicalCode(value) {
+  const raw = nonEmptyString(value);
+  return raw === undefined ? undefined : raw.trim().toUpperCase();
+}
+
+/** Build the canonical exclusion set from configured codes. */
+function canonicalCodeSet(codes) {
+  const set = new Set();
+  for (const code of codes) {
+    const canonical = canonicalCode(code);
+    if (canonical !== undefined && canonical.length > 0) set.add(canonical);
+  }
+  return set;
 }
 
 /**
@@ -218,12 +336,12 @@ function normalize(raw) {
   // 0 and negatives mean "no cap", matching how an empty panel field is read.
   const maxAttempts = parsedAttempts === null || parsedAttempts < 1 ? null : parsedAttempts;
 
-  const excludeCodes = new Set();
+  // Canonical on both sides, so `Auth`, `auth` and ` AUTH ` are one exclusion.
   const legacyExcludes = Array.isArray(source.terminalCodes) ? source.terminalCodes : [];
-  for (const code of [...legacyExcludes, ...(Array.isArray(source.excludeCodes) ? source.excludeCodes : [])]) {
-    const trimmed = typeof code === "string" ? code.trim() : "";
-    if (trimmed.length > 0) excludeCodes.add(trimmed);
-  }
+  const excludeCodes = canonicalCodeSet([
+    ...legacyExcludes,
+    ...(Array.isArray(source.excludeCodes) ? source.excludeCodes : []),
+  ]);
 
   const retired = Object.keys(RETIRED_KEYS).filter((key) => Object.hasOwn(source, key));
 
@@ -540,6 +658,9 @@ export function apply(ctx, config) {
 
   const lifetime = new AbortController();
   const active = new Set();
+
+  /** Sessions with a wait in flight right now, for the panel's live count. */
+  const activeSessions = new Set();
   const mountedAt = Date.now();
 
   function log(level, text) {
@@ -613,30 +734,126 @@ export function apply(ctx, config) {
   }
 
   // ---------------------------------------------------------------------
-  // Per-step retry chains
+  // Per-step retry ladders
+  //
+  // A ladder belongs to exactly one step: a new step is a new request context,
+  // so its first transient failure starts again at the initial delay instead of
+  // resuming at the previous step's ceiling.
+  //
+  // The ladder is folded from the `llm/retry` events this plugin already
+  // appends, exactly as `dsh-llm-retry` does for its own budget. Two things
+  // follow, and both matter:
+  //   1. The registry holds per-session cells in a WeakMap, so a ladder dies
+  //      with its session. A plugin-owned Map keyed by session id would pin one
+  //      entry per session this process ever retried, for the life of the
+  //      process.
+  //   2. The session log is the source of truth, so a resumed or replayed
+  //      session reconstructs the same ladder instead of restarting at attempt 1.
+  //
+  // When `recordSessionEvents` is off there is nothing to fold, so a bounded
+  // local Map carries the ladder instead. It is capped, so an unbounded
+  // process still cannot grow without limit.
   // ---------------------------------------------------------------------
-  /**
-   * A retry ladder belongs to exactly one step: a new step is a new request
-   * context, so its first transient failure starts again at the initial delay
-   * instead of resuming at the previous step's ceiling.
-   */
-  const chains = new Map();
+  const CHAIN_KEY = "unlimitedRetryChain";
 
-  function chainFor(sessionId) {
-    let chain = chains.get(sessionId);
-    if (chain === undefined) chains.set(sessionId, (chain = { attempt: 0, retryId: newRetryId() }));
-    return chain;
+  /** One retry series; see `CHAIN_SCHEMA` for why it is a real zod schema. */
+
+  /** Boundaries that end the request series owning a ladder. */
+  const CHAIN_RESETS = new Set(["step/start", "turn/start", "turn/end", "assistant/message"]);
+  const EMPTY_CHAIN = Object.freeze({ attempt: 0, retryId: undefined });
+
+  let chainsRegistered = false;
+  if (cfg.recordSessionEvents && CHAIN_SCHEMA !== undefined) {
+    try {
+      ctx.sessionProjections.register({
+        key: CHAIN_KEY,
+        stateVersion: 1,
+        stateSchema: CHAIN_SCHEMA,
+        init: () => EMPTY_CHAIN,
+        apply: (state, event) => {
+          const type = event?.type;
+          if (typeof type !== "string") return state;
+          if (CHAIN_RESETS.has(type)) return state.attempt === 0 ? state : EMPTY_CHAIN;
+          if (type !== "llm/retry") return state;
+          // Only this plugin's own retries own this ladder.
+          if (event.data?.policyKey !== POLICY_KEY) return state;
+          const attempt = Number.isSafeInteger(event.data?.retry) && event.data.retry > 0 ? event.data.retry : 0;
+          if (attempt === 0) return state;
+          const retryId = typeof event.data?.retryId === "string" ? event.data.retryId : state.retryId;
+          if (attempt === state.attempt && retryId === state.retryId) return state;
+          return { attempt, retryId };
+        },
+      });
+      chainsRegistered = true;
+    } catch (error) {
+      log("warn", `session projections unavailable (${String(error)}); retry ladders are bounded and process-local instead`);
+    }
   }
 
-  /** Reset on any boundary that ends the request series owning the ladder. */
-  const CHAIN_RESETS = new Set(["step/start", "turn/start", "turn/end", "assistant/message"]);
-  ctx.on("session/event", (session, event) => {
-    if (chains.size === 0) return;
-    const type = event?.type;
-    if (typeof type !== "string" || !CHAIN_RESETS.has(type)) return;
-    const id = session?.id;
-    if (id !== undefined) chains.delete(id);
-  });
+  /** Fallback ladder store: bounded, used when there is no projection to fold. */
+  const fallbackChains = new Map();
+  const FALLBACK_LIMIT = 512;
+  /** Set once, so a degraded ladder reports itself without flooding the log. */
+  let projectionReadFailed = false;
+
+  // The projection folds recorded boundaries on its own, but the fallback store
+  // has no such driver. Observe boundaries directly whenever the fallback is in
+  // use — otherwise `maxAttempts` would silently degrade from a per-step cap into
+  // a per-session lifetime cap, and just one earlier capped step would leave the
+  // session unable to retry at all.
+  if (!chainsRegistered) {
+    ctx.on("session/event", (session, event) => {
+      if (fallbackChains.size === 0) return;
+      const type = event?.type;
+      if (typeof type !== "string" || !CHAIN_RESETS.has(type)) return;
+      const id = session?.id ?? "unidentified-session";
+      fallbackChains.delete(id);
+    });
+  }
+
+  /**
+   * Read the ladder for one session.
+   * @param session - the session that owns the ladder.
+   * @returns the attempts already made in this series, and its identity.
+   */
+  function chainFor(session) {
+    if (chainsRegistered) {
+      try {
+        return ctx.sessionProjections.stateOf(session, CHAIN_KEY) ?? EMPTY_CHAIN;
+      } catch (error) {
+        // Reading a projection needs a real session (the registry folds its log
+        // to materialize the cell). A submission that reached this listener with
+        // something session-shaped but not a session must still get a retry, so
+        // fall through to the bounded store and say why, once.
+        if (!projectionReadFailed) {
+          projectionReadFailed = true;
+          log("warn", `cannot read the retry ladder from this session (${String(error)}); using the bounded local ladder`);
+        }
+      }
+    }
+    const id = session?.id ?? "unidentified-session";
+    return fallbackChains.get(id) ?? EMPTY_CHAIN;
+  }
+
+  /**
+   * Record that one attempt is being scheduled.
+   * @param session - the owning session.
+   * @param attempt - the attempt number being scheduled.
+   * @param retryId - the series identity.
+   */
+  function rememberChain(session, attempt, retryId) {
+    if (chainsRegistered) {
+      // The projection folds the `llm/retry` event appended by `backoff()`;
+      // nothing else may write here.
+      return;
+    }
+    const id = session?.id ?? "unidentified-session";
+    if (fallbackChains.size >= FALLBACK_LIMIT && !fallbackChains.has(id)) {
+      const oldest = fallbackChains.keys().next().value;
+      if (oldest !== undefined) fallbackChains.delete(oldest);
+    }
+    fallbackChains.set(id, { attempt, retryId });
+  }
 
   // ---------------------------------------------------------------------
   // Counters and the read model served to the panel
@@ -672,10 +889,20 @@ export function apply(ctx, config) {
       },
       ladder: ladder(),
       recommendedExclude: [...RECOMMENDED_EXCLUDE],
+      // The real Harness vocabulary, so the panel can offer a picker instead of
+      // asking an operator to spell a constant from memory. Providers still
+      // surface their own codes, which is why the input stays free text too.
+      knownFailureCodes: [...KNOWN_FAILURE_CODES],
+      // Rules that apply regardless of configuration, published so the panel can
+      // explain them rather than looking like it silently ignored a setting.
+      alwaysTerminalCodes: [...ALWAYS_TERMINAL_CODES],
       stats: {
         totalRetries: stats.totalRetries,
         activeWaits: active.size,
-        sessionsRetrying: chains.size,
+        // Distinct sessions with a live wait right now. The old count came from a
+        // plugin-owned Map that grew per session forever; this counts the waits
+        // actually in flight, which is the number the panel means.
+        sessionsRetrying: activeSessions.size,
         lastRetryAt: stats.lastRetryAt,
         lastCode: stats.lastCode,
         lastProvider: stats.lastProvider,
@@ -690,7 +917,7 @@ export function apply(ctx, config) {
   }
 
   /** One attempted schedule: record durably, count, wait, then confirm. */
-  async function backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, signal) {
+  async function backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal) {
     const fused = fuseSignals([signal, lifetime.signal]);
     if (fused.signal.aborted) {
       fused.release();
@@ -714,6 +941,8 @@ export function apply(ctx, config) {
       failure: normalizeFailure(failure),
     });
 
+    const sessionKey = session?.id ?? "unidentified-session";
+    activeSessions.add(sessionKey);
     const at = new Date().toISOString();
     stats.totalRetries += 1;
     stats.lastRetryAt = at;
@@ -733,6 +962,7 @@ export function apply(ctx, config) {
     );
 
     const completed = await cancellableDelay(delayMs, [fused.signal]);
+    activeSessions.delete(sessionKey);
     fused.release();
     if (!completed || fused.signal.aborted) return false;
 
@@ -757,20 +987,42 @@ export function apply(ctx, config) {
     if (!cfg.retryWithoutProviderPolicy && retryPolicy === undefined) return downstream;
     if (signal?.aborted || lifetime.signal.aborted) return downstream;
 
-    const code = nonEmptyString(failure.code) ?? "UNKNOWN";
+    // Recorded verbatim; compared canonically.
+    const rawCode = nonEmptyString(failure.code) ?? "UNKNOWN";
+    const code = canonicalCode(rawCode) ?? "UNKNOWN";
+
+    // A cancelled request is never a candidate, at any configuration. This runs
+    // before the configured exclusions because it is a correctness rule, not a
+    // policy: `dsh-llm` reports `ABORTED` for a cancelled signal even when the
+    // loop's own signal has not flipped yet, so an unguarded retry here would
+    // re-run work the user stopped.
+    if (ALWAYS_TERMINAL.has(code)) {
+      bump(stats.terminalSeen, code);
+      log("info", `failure "${code}" is a cancellation, not a fault; left to the loop`);
+      return downstream;
+    }
+
     if (cfg.excludeCodes.has(code)) {
       bump(stats.terminalSeen, code);
       log("info", `failure "${code}" is terminal here; left to the loop`);
       return downstream;
     }
 
-    const sessionId = agent?.session?.id ?? agent?.id ?? "agent";
-    const chain = chainFor(sessionId);
+    // The ladder is keyed by the session, never by the agent object: the session
+    // is created before the agent that owns it, and the agent itself carries no
+    // `id`. `chainFor` falls back to a single shared key when a session is
+    // missing, so a malformed submission cannot mint a fresh ladder per call and
+    // thereby escape `maxAttempts`.
+    const session = agent?.session;
+    const chain = chainFor(session);
     const attempt = chain.attempt + 1;
     if (cfg.maxAttempts !== null && attempt > cfg.maxAttempts) {
       log("warn", `attempt limit ${cfg.maxAttempts} reached for "${code}"; left to the loop`);
       return downstream;
     }
+
+    // One identity per retry series, so the two durable events pair up.
+    const retryId = chain.retryId ?? newRetryId();
 
     let delayMs = localDelay(cfg, attempt, Math.random);
     const retryAfter = failure?.providerRetryAfterMs;
@@ -778,8 +1030,10 @@ export function apply(ctx, config) {
       delayMs = Math.min(Math.max(1, Math.round(retryAfter)), cfg.maxDelayMs);
     }
 
-    chain.attempt = attempt;
-    if (!(await backoff(agent, turn, step, provider, failure, attempt, chain.retryId, delayMs, signal))) {
+    // Record before waiting: a wait that is cancelled must still be visible, and
+    // when the ladder is projection-folded this append IS the state update.
+    rememberChain(session, attempt, retryId);
+    if (!(await backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal))) {
       return downstream;
     }
     return { kind: "retry" };

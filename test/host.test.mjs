@@ -56,6 +56,33 @@ function fakeContext(options = {}) {
     return base();
   }
 
+  // A faithful-enough session-projection registry: state folds over the events
+  // a session records, held per session in a Map the test can inspect.
+  const projections = new Map();
+  const projectionCells = new Map();
+  services.set("sessionProjections", {
+    register(definition) {
+      projections.set(definition.key, definition);
+      return () => projections.delete(definition.key);
+    },
+    stateOf(session, key) {
+      const definition = projections.get(key);
+      if (definition === undefined) return undefined;
+      const id = session?.id ?? "unidentified-session";
+      return projectionCells.get(id)?.get(key) ?? definition.init();
+    },
+    /** Fold one recorded event, the way the real registry drives its units. */
+    fold(session, event) {
+      const id = session?.id ?? "unidentified-session";
+      if (!projectionCells.has(id)) projectionCells.set(id, new Map());
+      const cell = projectionCells.get(id);
+      for (const [key, definition] of projections) {
+        const previous = cell.get(key) ?? definition.init();
+        cell.set(key, definition.apply(previous, event));
+      }
+    },
+  });
+
   const ctx = base();
 
   return {
@@ -75,25 +102,24 @@ function fakeContext(options = {}) {
 }
 
 /** A minimal agent double whose session records appended events. */
-function fakeAgent(id = "session-1") {
+function fakeAgent(id = "session-1", projection) {
   const appended = [];
-  return {
+  const session = {
     id,
-    appended,
-    session: {
-      id,
-      append(type, data) {
-        appended.push({ type, data });
-        return { seq: appended.length };
-      },
+    append(type, data) {
+      appended.push({ type, data });
+      // The real Session drives registered projections as it records.
+      projection?.fold(session, { type, data });
+      return { seq: appended.length };
     },
   };
+  return { id, appended, session };
 }
 
 /** One transient failure payload. */
 function failurePayload(code = "NETWORK", extra = {}) {
   return {
-    agent: fakeAgent(),
+    agent: fakeAgent("session-1", extra.projection),
     turn: 1,
     step: 1,
     provider: "deepseek",
@@ -216,7 +242,7 @@ test("maxAttempts bounds this plugin and then delegates", async () => {
   const fake = fakeContext();
   plugin.apply(fake.ctx, { maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 2 });
 
-  const agent = fakeAgent();
+  const agent = fakeAgent("session-1", fake.services.get("sessionProjections"));
   const payload = () => ({
     ...failurePayload(),
     agent,
@@ -257,13 +283,14 @@ test("a new step restarts the ladder instead of continuing at the ceiling", asyn
   const fake = fakeContext();
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 });
 
-  const agent = fakeAgent();
+  const projection = fake.services.get("sessionProjections");
+  const agent = fakeAgent("session-1", projection);
   await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
   await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
   assert.equal(agent.appended.at(-1).data.retry, 2);
 
-  // A new step begins: the ladder resets.
-  fake.listeners.get("session/event")({ id: agent.id }, { type: "step/start" });
+  // A new step begins: the recorded boundary resets the folded ladder.
+  agent.session.append("step/start", { turn: 2, step: 1 });
   await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
   assert.equal(agent.appended.at(-1).data.retry, 1, "attempt numbering restarts per step");
   await fake.dispose();
@@ -598,3 +625,182 @@ function fakeRequest(method, headers = {}, body) {
   })();
   return { method, headers, [Symbol.asyncIterator]: () => stream };
 }
+
+// ---------------------------------------------------------------------------
+// Cancellation is not a fault.
+//
+// `dsh-llm` produces an `aborted` finish when `signal.aborted || code ===
+// "ABORTED"`, so an ABORTED failure reaches this listener with the loop signal
+// still live. Retrying it would re-run work the user cancelled — forever, under
+// an unbounded budget. These tests pin the guard at every level it can be
+// reached from.
+// ---------------------------------------------------------------------------
+
+test("a cancelled request is never retried, even with no exclusions at all", async () => {
+  const fake = fakeContext();
+  // Deliberately the most permissive configuration: no codes excluded.
+  plugin.apply(fake.ctx, { excludeCodes: [], maxAttempts: null, initialDelayMs: 1, maxDelayMs: 2 });
+
+  const payload = failurePayload("ABORTED");
+  const action = await fake.fire("agent/request-error", payload, async () => undefined);
+  assert.equal(action, undefined, "a cancellation must not be retried");
+  assert.equal(payload.agent.appended.length, 0, "and must not be reported as a retry");
+  await fake.dispose();
+});
+
+test("the cancellation guard ignores case and surrounding whitespace", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { excludeCodes: [], initialDelayMs: 1, maxDelayMs: 2 });
+
+  for (const spelling of ["ABORTED", "aborted", "Aborted", " ABORTED ", "\taborted\n"]) {
+    const action = await fake.fire(
+      "agent/request-error",
+      failurePayload(spelling),
+      async () => undefined,
+    );
+    assert.equal(action, undefined, `"${spelling}" must be recognised as a cancellation`);
+  }
+  await fake.dispose();
+});
+
+test("a code merely starting with ABORT is not treated as a cancellation", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { excludeCodes: [], initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("ABORT_WATCHDOG_EXPIRED"), async () => undefined);
+  assert.deepEqual(action, { kind: "retry" }, "the guard is an exact match, not a prefix test");
+  await fake.dispose();
+});
+
+test("configured exclusions are matched canonically too", async () => {
+  const fake = fakeContext();
+  // Mixed case and padding in the operator's own list must still match.
+  plugin.apply(fake.ctx, { excludeCodes: ["auth", "  Quota  "], initialDelayMs: 1, maxDelayMs: 2 });
+
+  for (const code of ["AUTH", "auth", "Quota", "QUOTA"]) {
+    const action = await fake.fire("agent/request-error", failurePayload(code), async () => undefined);
+    assert.equal(action, undefined, `"${code}" must match the configured exclusion`);
+  }
+  const action = await fake.fire("agent/request-error", failurePayload("NETWORK"), async () => undefined);
+  assert.deepEqual(action, { kind: "retry" }, "an unrelated code still retries");
+  await fake.dispose();
+});
+
+test("a cancelled request is counted as terminal, not as a silent no-op", async () => {
+  const routes = new Map();
+  const fake = fakeContext({
+    services: { webServer: { register: (route) => (routes.set(route.path, route), () => {}) } },
+  });
+  plugin.apply(fake.ctx, { excludeCodes: [], initialDelayMs: 1, maxDelayMs: 2 });
+
+  // Counters are process-wide, so read deltas rather than absolutes.
+  const read = () => {
+    const response = captureResponse();
+    routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), response.res);
+    return JSON.parse(response.text()).stats;
+  };
+  const terminalFor = (stats, code) => stats.terminalSeen.find((row) => row.code === code)?.count ?? 0;
+
+  const before = read();
+  await fake.fire("agent/request-error", failurePayload("aborted"), async () => undefined);
+  const after = read();
+
+  assert.equal(after.totalRetries, before.totalRetries, "a cancellation performs no retry");
+  assert.equal(terminalFor(after, "ABORTED") - terminalFor(before, "ABORTED"), 1,
+    "the panel must show that the cancellation was declined");
+  await fake.dispose();
+});
+
+test("a submission with no usable session identity keeps one stable ladder", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 2 });
+
+  // No session id anywhere: the ladder must still be shared, not per-call, or
+  // maxAttempts could never be reached. This session has no `id`, so both the
+  // projection and the fallback collapse to one fixed key.
+  const projection = fake.services.get("sessionProjections");
+  const session = { append(type, data) { projection.fold(session, { type, data }); } };
+  const payload = { ...failurePayload(), agent: { session } };
+  assert.deepEqual(await fake.fire("agent/request-error", payload, async () => undefined), { kind: "retry" });
+  assert.deepEqual(await fake.fire("agent/request-error", payload, async () => undefined), { kind: "retry" });
+  assert.equal(await fake.fire("agent/request-error", payload, async () => undefined), undefined);
+  await fake.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Ladder lifecycle.
+//
+// The ladder is per step, and it must stay per step under every configuration.
+// A ladder that never resets turns `maxAttempts` into a per-session lifetime cap,
+// which is a far sharper failure than it looks: one capped step would leave the
+// session permanently unable to retry.
+// ---------------------------------------------------------------------------
+
+test("the ladder resets per step even with session events turned off", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, {
+    maxAttempts: 2,
+    initialDelayMs: 1,
+    maxDelayMs: 2,
+    recordSessionEvents: false,
+  });
+
+  const agent = fakeAgent("session-1");
+  const fire = () => fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
+
+  assert.deepEqual(await fire(), { kind: "retry" });
+  assert.deepEqual(await fire(), { kind: "retry" });
+  assert.equal(await fire(), undefined, "the cap is reached within this step");
+
+  // A new step is a new request series. The real Session dispatches
+  // `session/event` as it records, so the double must too.
+  agent.session.append("step/start", { turn: 2, step: 1 });
+  const onSessionEvent = fake.listeners.get("session/event");
+  assert.ok(onSessionEvent, "the fallback ladder must observe session boundaries");
+  onSessionEvent(agent.session, { type: "step/start" });
+  assert.deepEqual(await fire(), { kind: "retry" }, "the cap applies per step, not per session");
+  await fake.dispose();
+});
+
+test("ladders do not accumulate one entry per session", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, {
+    initialDelayMs: 1,
+    maxDelayMs: 1,
+    recordSessionEvents: false,
+    maxAttempts: 2,
+  });
+
+  // 400 distinct sessions is far past the fallback bound; the point is that the
+  // plugin keeps working and does not hold an entry per session forever.
+  for (let index = 0; index < 400; index += 1) {
+    const agent = fakeAgent(`session-${index}`);
+    const action = await fake.fire(
+      "agent/request-error",
+      { ...failurePayload(), agent, signal: new AbortController().signal },
+      async () => undefined,
+    );
+    assert.deepEqual(action, { kind: "retry" });
+  }
+  await fake.dispose();
+});
+
+test("concurrent waits in one step each get their own attempt number", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  const projection = fake.services.get("sessionProjections");
+  const agent = fakeAgent("session-1", projection);
+  const fire = () => fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
+
+  const [first, second] = await Promise.all([fire(), fire()]);
+  assert.deepEqual(first, { kind: "retry" });
+  assert.deepEqual(second, { kind: "retry" });
+
+  const attempts = agent.appended
+    .filter((entry) => entry.type === "llm/retry")
+    .map((entry) => entry.data.retry)
+    .sort((a, b) => a - b);
+  assert.deepEqual(attempts, [1, 2], "two concurrent waits are attempts 1 and 2, not both 1");
+  await fake.dispose();
+});

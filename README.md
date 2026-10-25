@@ -87,16 +87,25 @@ initialDelayMs: 1000
 maxDelayMs: 60000
 jitterRatio: 0.2
 retryWithoutProviderPolicy: true
-excludeCodes: []         # no code is terminal
+excludeCodes: []         # no configured code is terminal (ABORTED always is)
 recordSessionEvents: true
 log: true
 ```
 
-**No failure code is terminal by default — including auth, quota, billing, and
-context-overflow codes.** That is what *unlimited* means here, and it is
-announced once at mount so it is a visible decision rather than a silent spend.
-The only bound is `maxDelayMs`, so a permanently failing request costs roughly
-one request per minute, forever.
+**No configured failure code is terminal by default — including auth, quota,
+billing, and context-overflow codes.** That is what *unlimited* means here, and
+it is announced once at mount so it is a visible decision rather than a silent
+spend. The only bound is `maxDelayMs`, so a permanently failing request costs
+roughly one request per minute, forever.
+
+One code is terminal regardless of configuration: **`ABORTED`**. A cancellation
+is not a fault — the turn was stopped, or the process is shutting down. `dsh-llm`
+reports an `aborted` finish when `signal.aborted || code === "ABORTED"`, which
+means an `ABORTED` failure can arrive while the loop's own signal is still live.
+Retrying it would re-run work you just cancelled, so the guard is applied before
+`excludeCodes` and clearing that list does not re-enable it. Code matching is
+case-insensitive and whitespace-trimmed on both sides, so `Aborted`, `ABORTED`
+and ` aborted ` are the same code.
 
 Two ways to bound it:
 
@@ -161,6 +170,27 @@ service, and with `409` when the row is not addressable or there is no
 These routes are a convenience for the panel. The retry behaviour itself never
 depends on them, so a headless or ACP composition mounts the policy with no
 routes at all.
+
+### Any mode, any composition
+
+The retry policy is a Host plugin, so it applies to every session the profile
+starts, under every preset, and in a headless or ACP composition with no Web
+server at all. The plugin registers one `agent/request-error` listener and
+nothing else is required; the panel is a separate, optional surface.
+
+Verified against the shipped contracts, not just a stub:
+
+- the real Cordis dispatcher, with sibling agents under one composition, each
+  keeping its own ladder;
+- the real session-projection service, including a resumed cell replayed from
+  the session log;
+- an agent mounted inside a preset scope, where the listener is scope-tagged;
+- a composition with no `webServer`, no `connection` and no `configEditor`,
+  which still retries and simply has no panel.
+
+What it does **not** do: retry a request the provider adapter never admitted, or
+one that fails before the agent loop has a turn — those never reach
+`agent/request-error`. `ABORTED` is declined by design.
 
 ## Verify
 
