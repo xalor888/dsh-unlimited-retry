@@ -1,0 +1,32 @@
+# dsh-unlimited-retry bundle patch.
+#
+# One Loader row. The `config` block below is the profile-independent default:
+# an override anywhere above this layer replaces the WHOLE `config`, so any
+# layer that overrides this row must restate every field it wants to keep.
+#
+# Defaults are deliberate:
+#   autoRetry: true          — the plugin's entire reason to exist
+#   maxAttempts: null        — no attempt limit
+#   excludeCodes: []         — NO code is terminal, including auth/quota/context
+#   maxDelayMs: 60000        — the only bound on an unbounded budget
+#
+# If you want a bounded budget, either set maxAttempts, or list the permanent
+# failure codes in excludeCodes (the Settings panel has a one-click preset for
+# exactly that set).
+
+- insert:
+    - id: unlimited-retry
+      name: dsh-unlimited-retry
+      config:
+        autoRetry: true
+        maxAttempts: null
+        initialDelayMs: 1000
+        maxDelayMs: 60000
+        jitterRatio: 0.2
+        retryWithoutProviderPolicy: true
+        excludeCodes: []
+        recordSessionEvents: true
+        log: true
+        # Opt-in mount probe: set to an absolute path to write one JSON line on
+        # activation. Left null because it is a diagnostic, not a feature.
+        markerFile: null

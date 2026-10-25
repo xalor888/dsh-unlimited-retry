@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Unlimited Retry",
+    "description": "Retries a model request that no other recovery layer handled, with bounded backoff and a live Settings panel."
+  }
+}

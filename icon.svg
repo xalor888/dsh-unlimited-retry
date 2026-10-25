@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Unlimited Retry">
+  <defs>
+    <linearGradient id="ur-ring" x1="10" y1="8" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4d8df6"/>
+      <stop offset="1" stop-color="#7b5cff"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#ur-ring)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 32a14 14 0 0 1 23.9-9.9"/>
+    <path d="M46 32a14 14 0 0 1-23.9 9.9"/>
+  </g>
+  <g fill="#ffffff">
+    <path d="M43.6 13.2 44.9 25l-11.6-3.3z"/>
+    <path d="M20.4 50.8 19.1 39l11.6 3.3z"/>
+  </g>
+  <circle cx="32" cy="32" r="5" fill="#ffffff"/>
+  <circle cx="32" cy="32" r="2" fill="url(#ur-ring)"/>
+</svg>
