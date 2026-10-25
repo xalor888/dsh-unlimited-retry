@@ -1,0 +1,170 @@
+name: CI
+
+# Every push and PR: prove the package is sane across the Node versions its
+# `engines` range promises, then prove the tarball a user would actually install
+# still works on its own.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matches engines.node ">=20".
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dev dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax check the shipped modules
+        run: |
+          node --check index.js
+          node --check client.js
+
+      - name: Run the test suite
+        run: npm test
+
+      - name: State what did not run
+        if: always()
+        run: |
+          # test/projection.test.mjs mounts a real Harness, which CI has none of,
+          # so it skips. Say so out loud rather than letting a skip read as
+          # coverage. Locally:
+          #   DSH_INSTALL_DIR=~/.local/lib/node_modules/@deepseek-ai/dsh/node_modules npm test
+          echo "::notice::Integration tests that need a Harness install skip in CI by design."
+
+  package:
+    name: verify the installable tarball
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build the tarball
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          node -e "
+            const [entry] = require('./pack.json');
+            console.log('filename=' + entry.filename);
+            console.log('files=' + entry.files.length);
+            console.log('size=' + entry.size);
+          " | tee -a "$GITHUB_OUTPUT"
+
+      - name: Assert the payload a user receives
+        run: |
+          # The published set is a contract: a missing file breaks the bundle for
+          # everyone who installs it, and only a pack-level check catches that.
+          tar -tzf ./*.tgz | sed 's|^package/||' | sort > actual.txt
+          cat > expected.txt <<'EOF'
+          LICENSE
+          README.md
+          README.zh.md
+          client.js
+          cordis.patch.yml
+          icon.svg
+          index.js
+          locale/en.json
+          locale/zh.json
+          package.json
+          EOF
+          sort -o expected.txt expected.txt
+          if ! diff -u expected.txt actual.txt; then
+            echo "::error::the packed file set drifted from what the bundle needs"
+            exit 1
+          fi
+
+      - name: Install the tarball in a clean project
+        run: |
+          # Installing from the tarball (not the checkout) is the only way to see
+          # what a user sees: exports resolve, the patch is present, the icon loads.
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/*.tgz --no-audit --no-fund
+
+      - name: Exercise the installed package
+        run: |
+          cd /tmp/consumer
+          node -e "
+          const { createRequire } = require('node:module');
+          const req = createRequire('/tmp/consumer/package.json');
+          const manifest = req('dsh-unlimited-retry/package.json');
+          if (manifest.dsh.bundle.patch !== './cordis.patch.yml') throw new Error('bundle patch missing');
+          if (manifest.dsh.client.platform !== 'web') throw new Error('client platform missing');
+          if (manifest.icon === undefined) throw new Error('icon not declared');
+          // require() cannot load YAML, so resolve the packaged path and read it.
+          const { readFileSync } = require('node:fs');
+          const { dirname, join } = require('node:path');
+          const root = dirname(req.resolve('dsh-unlimited-retry/package.json'));
+          const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8');
+          for (const key of ['autoRetry','maxAttempts','maxDelayMs','excludeCodes']) {
+            if (!patch.includes(key)) throw new Error('patch is missing ' + key);
+          }
+          // The client bundle and icon must resolve through the declared exports,
+          // because client-modules reads exactly those subpaths.
+          const clientPath = req.resolve('dsh-unlimited-retry/client');
+          const iconPath = req.resolve('dsh-unlimited-retry/icon');
+          const client = readFileSync(clientPath, 'utf8');
+          if (!client.includes('__ModuleLoader__')) throw new Error('client bundle is not a module-loader script');
+          if (!readFileSync(iconPath, 'utf8').startsWith('<svg')) throw new Error('icon is not SVG');
+          console.log('manifest + patch + client + icon OK');
+          "
+
+      - name: Mount the installed host half
+        run: |
+          cd /tmp/consumer
+          node --input-type=module -e "
+          const plugin = await import('dsh-unlimited-retry');
+          if (plugin.name !== 'unlimited-retry') throw new Error('bad plugin name');
+          if (typeof plugin.apply !== 'function') throw new Error('no apply');
+          const listeners = {};
+          const ctx = {
+            logger: { info(){}, warn(){}, error(){}, debug(){} },
+            on: (event, fn) => { listeners[event] = fn; return () => {}; },
+            effect: (create) => { const d = create(); return () => {}; },
+            get: () => undefined,
+            inject: () => {},
+          };
+          plugin.apply(ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+          const agent = { session: { id: 'ci', append(){} } };
+          const fire = (code) => listeners['agent/request-error'](
+            { agent, turn: 1, step: 1, provider: 'p', failure: { message: 'x', code }, signal: new AbortController().signal },
+            async () => undefined,
+          );
+          const retried = await fire('NETWORK');
+          if (retried?.kind !== 'retry') throw new Error('a transient failure must retry');
+          const cancelled = await fire('ABORTED');
+          if (cancelled !== undefined) throw new Error('a cancellation must never retry');
+          console.log('installed host half retries and declines a cancellation');
+          "
+
+      - name: Upload the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-unlimited-retry-tarball
+          path: ./*.tgz
+          retention-days: 14

@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "2.1.2";
+const PLUGIN_VERSION = "2.2.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";

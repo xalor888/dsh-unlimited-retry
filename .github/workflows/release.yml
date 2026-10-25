@@ -1,0 +1,103 @@
+name: Release
+
+# Publishing is a deliberate act: a tag is the only trigger, and the tag must
+# agree with package.json. Nothing here publishes from a branch.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Build and verify only; do not publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # create the GitHub release
+  id-token: write   # npm provenance
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Install dev dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Refuse a tag that disagrees with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # A published version cannot be unpublished, so catch the mismatch here
+          # rather than after the registry has accepted a wrong number.
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG"
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
+
+      - name: Build the tarball
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          node -e "
+            const [e] = require('./pack.json');
+            console.log('filename=' + e.filename);
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Publish (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry-run
+        run: npm publish --dry-run
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && !inputs.dry-run)
+        # --provenance needs the id-token permission above and a public repo.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${{ steps.pack.outputs.filename }}"
+
+      - name: Install the published version from the registry
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && !inputs.dry-run)
+        run: |
+          # Proves the registry copy — not just the local tarball — is complete.
+          VERSION="$(node -p "require('./package.json').version")"
+          for attempt in 1 2 3 4 5; do
+            if npm view "dsh-unlimited-retry@$VERSION" version >/dev/null 2>&1; then break; fi
+            echo "waiting for the registry to serve $VERSION ($attempt/5)"
+            sleep 10
+          done
+          mkdir -p /tmp/registry-check && cd /tmp/registry-check
+          npm init -y >/dev/null
+          npm install "dsh-unlimited-retry@$VERSION" --no-audit --no-fund
+          node --input-type=module -e "
+          const plugin = await import('dsh-unlimited-retry');
+          if (plugin.name !== 'unlimited-retry' || typeof plugin.apply !== 'function') {
+            throw new Error('the published package does not mount');
+          }
+          console.log('published package mounts');
+          "

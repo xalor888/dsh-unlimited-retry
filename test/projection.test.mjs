@@ -8,17 +8,53 @@
  * and dispatch through real Cordis contexts, so a mismatch fails here instead of
  * in a user's session.
  */
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 
-const HARNESS = "/Users/xalor/.local/lib/node_modules/@deepseek-ai/dsh/node_modules";
+/**
+ * Locate the installed Harness.
+ *
+ * These tests exist to mount the REAL projection service and the REAL Cordis
+ * dispatcher, so they need a Harness installation. CI has none, and a hard-coded
+ * path would either fail there or silently test a stale copy. Resolution order:
+ * `DSH_HOME`-derived install, an explicit `DSH_INSTALL_DIR`, then the default
+ * global prefix. When none resolves, the suite skips rather than lying.
+ */
+// An explicit DSH_INSTALL_DIR is authoritative: it either works or the suite
+// skips, so CI can assert the integration path is really exercised.
+const EXPLICIT = process.env.DSH_INSTALL_DIR;
+const CANDIDATES = EXPLICIT === undefined
+  ? [
+      `${process.env.HOME ?? ""}/.local/lib/node_modules/@deepseek-ai/dsh/node_modules`,
+      "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules",
+      "/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules",
+    ]
+  : [EXPLICIT];
 
-const { Context } = await import(`${HARNESS}/@deepseek-ai/cordis/lib/index.js`);
-const { default: projectionPlugin } = await import(`${HARNESS}/@deepseek-ai/dsh-session-projection/lib/index.js`);
+const { existsSync } = await import("node:fs");
+const HARNESS = CANDIDATES.find(
+  (candidate) => typeof candidate === "string" && candidate.length > 0
+    && existsSync(`${candidate}/@deepseek-ai/cordis/lib/index.js`),
+);
 
 process.env.DSH_PROFILE = process.env.DSH_PROFILE ?? "web";
 process.env.DSH_PROFILE_DIR = process.env.DSH_PROFILE_DIR ?? `${process.env.HOME}/.dsh/profiles/web`;
+
 const plugin = await import("../index.js");
+
+// An absent Harness is a missing prerequisite, not a passing test.
+const skip = HARNESS === undefined
+  ? "no installed DeepSeek Harness found; set DSH_INSTALL_DIR to run the integration tests"
+  : false;
+
+// Imported lazily so the skip path never touches a missing path.
+/** Register a test, skipping the whole file when no Harness is installed. */
+const it = (title, fn) => (skip === false ? nodeTest(title, fn) : nodeTest.skip(title, fn));
+
+const { Context } = HARNESS === undefined ? {} : await import(`${HARNESS}/@deepseek-ai/cordis/lib/index.js`);
+const { default: projectionPlugin } = HARNESS === undefined
+  ? {}
+  : await import(`${HARNESS}/@deepseek-ai/dsh-session-projection/lib/index.js`);
 
 /**
  * A session double complete enough for the real registry to fold its log.
@@ -66,7 +102,7 @@ function fire(app, session, failure = { message: "x", code: "NETWORK" }) {
   );
 }
 
-test("against the real registry, maxAttempts bounds the step and a new step resets it", async () => {
+it("against the real registry, maxAttempts bounds the step and a new step resets it", async () => {
   const root = await projectionRoot();
   const app = root.extend();
   plugin.apply(app, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
@@ -80,7 +116,7 @@ test("against the real registry, maxAttempts bounds the step and a new step rese
   assert.deepEqual(await fire(app, session), { kind: "retry" }, "a new step restarts the ladder");
 });
 
-test("the registered state schema round-trips a cell the registry will replay", async () => {
+it("the registered state schema round-trips a cell the registry will replay", async () => {
   // The registry validates a replayed cell with `stateSchema.parse`, so an
   // inadequate schema registers cleanly and only fails on resume.
   const root = await projectionRoot();
@@ -96,7 +132,7 @@ test("the registered state schema round-trips a cell the registry will replay", 
   assert.equal(value.attempt, 1);
 });
 
-test("the ladder dies with its session instead of accumulating per session", async () => {
+it("the ladder dies with its session instead of accumulating per session", async () => {
   const root = await projectionRoot();
   const app = root.extend();
   plugin.apply(app, { initialDelayMs: 1, maxDelayMs: 1 });
@@ -110,7 +146,7 @@ test("the ladder dies with its session instead of accumulating per session", asy
   }
 });
 
-test("a cancellation is declined through the real dispatcher too", async () => {
+it("a cancellation is declined through the real dispatcher too", async () => {
   const root = await projectionRoot();
   const app = root.extend();
   plugin.apply(app, { initialDelayMs: 1, maxDelayMs: 2, excludeCodes: [] });
@@ -120,7 +156,7 @@ test("a cancellation is declined through the real dispatcher too", async () => {
   assert.equal(session.events.filter((event) => event.type === "llm/retry").length, 0);
 });
 
-test("cancelling the turn during the wait stops the retry", async () => {
+it("cancelling the turn during the wait stops the retry", async () => {
   const root = await projectionRoot();
   const app = root.extend();
   plugin.apply(app, { initialDelayMs: 5_000, maxDelayMs: 5_000, jitterRatio: 0 });
@@ -146,7 +182,7 @@ test("cancelling the turn during the wait stops the retry", async () => {
   assert.deepEqual(types, ["llm/retry"], "the scheduled record survives, the started record does not");
 });
 
-test("sibling agents under one composition each get their own ladder", async () => {
+it("sibling agents under one composition each get their own ladder", async () => {
   const root = await projectionRoot();
   const app = root.extend();
   plugin.apply(app, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 1 });

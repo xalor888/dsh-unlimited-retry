@@ -1,6 +1,6 @@
 {
   "name": "dsh-unlimited-retry",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Unbounded model-request retry for the DeepSeek Harness agent loop, with a live Settings panel.",
   "keywords": [
     "deepseek",
@@ -21,6 +21,7 @@
   "bugs": {
     "url": "https://github.com/xalor888/dsh-unlimited-retry/issues"
   },
+  "icon": "./icon.svg",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -48,6 +49,10 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "dsh": {
     "bundle": {
