@@ -190,6 +190,7 @@ test("the page renders a live snapshot without touching the DOM", async () => {
     errorCode: null,
     fetchedAt: Date.now(),
     everLoaded: true,
+    consecutiveFailures: 0,
   };
   const useFeed = () => snapshot;
   const props = { ...options.inject(), t: fake.ctx.locale.bind("unlimitedRetry"), useFeed };
@@ -216,6 +217,7 @@ test("the page renders Chinese copy when the locale is Chinese", async () => {
     errorCode: null,
     fetchedAt: Date.now(),
     everLoaded: true,
+    consecutiveFailures: 0,
   };
   const zhContext = fakeClientContext("zh");
   exported.apply(zhContext.ctx);
@@ -246,6 +248,7 @@ test("an unreachable host renders an error state instead of crashing", async () 
       errorCode: null,
       fetchedAt: 0,
       everLoaded: false,
+      consecutiveFailures: 5,
     }),
   }));
   assert.match(html, /did not answer/);
@@ -270,6 +273,7 @@ test("a read-only composition disables writes but still renders the policy", asy
       errorCode: null,
       fetchedAt: Date.now(),
       everLoaded: true,
+      consecutiveFailures: 0,
     }),
   }));
   assert.match(html, /no config editor/i);
@@ -300,6 +304,7 @@ test("the empty activity state is explicit rather than blank", async () => {
       errorCode: null,
       fetchedAt: Date.now(),
       everLoaded: true,
+      consecutiveFailures: 0,
     }),
   }));
   assert.match(html, /No retry has been performed/);
@@ -369,3 +374,29 @@ function sampleSnapshot() {
     },
   };
 }
+
+test("a reload right after a save is not reported as an outage", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  // The host half reloads on a config write, so the first poll after a save can
+  // legitimately fail. That must not paint a red banner over a successful save.
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({
+      status: "error",
+      data: sampleSnapshot(),
+      error: "Failed to fetch",
+      errorCode: null,
+      fetchedAt: Date.now(),
+      everLoaded: true,
+      consecutiveFailures: 1,
+    }),
+  }));
+  assert.doesNotMatch(html, /did not answer/, "one failed poll is not an outage");
+  // The data itself is still on screen, from the previous successful poll.
+  assert.match(html, /Model request retry/);
+});

@@ -447,6 +447,7 @@ window.__ModuleLoader__.load({
         errorCode: null,
         fetchedAt: 0,
         everLoaded: false,
+        consecutiveFailures: 0,
       });
 
       timer = null;
@@ -466,6 +467,7 @@ window.__ModuleLoader__.load({
             state.errorCode = null;
             state.fetchedAt = Date.now();
             state.everLoaded = true;
+            state.consecutiveFailures = 0;
           });
         } catch (error) {
           if (this.disposed) return;
@@ -474,6 +476,7 @@ window.__ModuleLoader__.load({
             state.error = String(error?.message ?? error);
             state.errorCode = typeof error?.code === "string" ? error.code : null;
             state.fetchedAt = Date.now();
+            state.consecutiveFailures = (state.consecutiveFailures ?? 0) + 1;
           });
         } finally {
           this.inflight = false;
@@ -775,12 +778,18 @@ window.__ModuleLoader__.load({
 
       const notices = [];
       if (state.status === "error") {
-        notices.push(React.createElement(Notice, {
-          key: "net",
-          tone: "error",
-          detail: state.error,
-          children: state.everLoaded ? `${t("unreachable")}` : `${t("unreachable")}`,
-        }));
+        // A config write reloads the host half, so one failed poll right after a
+        // successful save is the reload itself, not an outage. Only a failure
+        // that outlives a few polls is reported as unreachable.
+        const recovering = outcome?.tone === "ok" || state.consecutiveFailures < 3;
+        if (!recovering) {
+          notices.push(React.createElement(Notice, {
+            key: "net",
+            tone: "error",
+            detail: state.error,
+            children: t("unreachable"),
+          }));
+        }
       }
       if (outcome !== null) {
         notices.push(React.createElement(Notice, {

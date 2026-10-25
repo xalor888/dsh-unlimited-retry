@@ -133,7 +133,7 @@ const RETIRED_KEYS = Object.freeze({
 async function loadConfigSchema() {
   const schemastery = await importSchemastery();
   if (typeof schemastery?.object !== "function") return undefined;
-  const ms = (value) => schemastery.number().step(1).min(value);
+  const ms = (value) => schemastery.number().min(value);
   const nullableString = schemastery.union([schemastery.string(), schemastery.const(null)]);
   const nullableCount = schemastery.union([ms(1), schemastery.const(null)]);
   return schemastery.object({
@@ -141,7 +141,11 @@ async function loadConfigSchema() {
     maxAttempts: nullableCount.description("Cap the retries this plugin performs per step. Empty or null means no limit."),
     initialDelayMs: ms(1).default(1000).description("First backoff delay in milliseconds."),
     maxDelayMs: ms(1).default(60000).description("Ceiling for any single backoff delay, in milliseconds."),
-    jitterRatio: schemastery.number().min(0).max(1).step(0.01).default(0.2).description("Randomization applied to each delay, as a fraction of the nominal value."),
+    // No `.step()` anywhere: a fractional or offset step cannot be expressed in
+    // portable JSON Schema, and the projection would have to report the whole
+    // field as native-validation-only. Whole-number enforcement is applied by
+    // `normalize()` instead, which is stricter than a hint either way.
+    jitterRatio: schemastery.number().min(0).max(1).default(0.2).description("Randomization applied to each delay, as a fraction of the nominal value."),
     retryWithoutProviderPolicy: schemastery.boolean().default(true).description("Retry even when the serving adapter published no retryPolicy."),
     excludeCodes: schemastery.array(schemastery.string()).default([]).description("Failure codes that stay terminal."),
     recordSessionEvents: schemastery.boolean().default(true).description("Append llm/retry and llm/retry-started session events."),
