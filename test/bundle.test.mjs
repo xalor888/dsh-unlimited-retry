@@ -182,3 +182,26 @@ test("the manifest declares the DSH range the host enforces", async () => {
   // A future major must not be silently claimed.
   assert.ok(!semver.satisfies("0.3.0", range, { includePrerelease: true }));
 });
+
+test("the DSH badge states the same range engines.dsh declares", async () => {
+  const manifest = JSON.parse(await read("package.json"));
+  const range = manifest.engines.dsh;
+
+  // A hard-coded badge drifts the moment the range changes, and a badge claiming
+  // support the manifest does not is worse than no badge. Derive the expected
+  // encoding from the manifest and require the README to carry exactly it.
+  const encoded = `dsh-${encodeURIComponent(range).replace(/-/g, "--")}`;
+  for (const file of ["README.md", "README.zh.md"]) {
+    const text = await read(file);
+    const badge = text.match(/img\.shields\.io\/badge\/(dsh-[^)\s]*)\.svg/);
+    assert.ok(badge, `${file} is missing the DSH badge`);
+    // Compare against the decoded label rather than the exact escaping, since
+    // percent-encoding has several valid spellings for the same text.
+    // shields.io appends the colour as a final `-<colour>` segment; drop it
+    // before decoding, then collapse `--` back to the `-` it escapes.
+    const withoutColour = badge[1].slice(4).replace(/-[^-]*$/, "");
+    const label = decodeURIComponent(withoutColour).replace(/--/g, "-");
+    assert.equal(label, range, `${file}: the DSH badge must state engines.dsh verbatim`);
+  }
+  assert.ok(encoded.length > 0);
+});

@@ -6,6 +6,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-unlimited-retry.svg)](https://www.npmjs.com/package/dsh-unlimited-retry)
 [![license](https://img.shields.io/github/license/xalor888/dsh-unlimited-retry.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-unlimited-retry.svg)](package.json)
+[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--0%20%3C0.3.0--0-8a2be2.svg)](#兼容性)
 
 DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实时设置面板。
 
