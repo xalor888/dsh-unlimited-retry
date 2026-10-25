@@ -896,3 +896,59 @@ test("a failing config editor is reported, not thrown out of the route", async (
   assert.match(JSON.parse(write.text()).code, /bad-request|not-addressable|no-editor/);
   await fake.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// Configuration is a promise, not a hint.
+//
+// `maxDelayMs` is the only setting that bounds an otherwise unbounded budget.
+// Clamping it upward to accommodate another field would silently break the one
+// guarantee an operator can rely on, and coercing a cleared field with Number()
+// would turn "unset" into zero.
+// ---------------------------------------------------------------------------
+
+test("maxDelayMs wins a conflict with an oversized initialDelayMs", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 90_000, maxDelayMs: 10, jitterRatio: 0 });
+
+  const payload = failurePayload();
+  const action = await fake.fire("agent/request-error", payload, async () => undefined);
+  assert.deepEqual(action, { kind: "retry" });
+  assert.ok(
+    payload.agent.appended[0].data.delayMs <= 10,
+    `the ceiling must hold, got ${payload.agent.appended[0].data.delayMs}`,
+  );
+  await fake.dispose();
+});
+
+test("every delay stays within the ceiling across a full ladder", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 50_000, maxDelayMs: 25, jitterRatio: 1 });
+
+  const payload = failurePayload();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await fake.fire("agent/request-error", payload, async () => undefined);
+  }
+  const delays = payload.agent.appended
+    .filter((entry) => entry.type === "llm/retry")
+    .map((entry) => entry.data.delayMs);
+  assert.equal(delays.length, 6);
+  for (const delay of delays) {
+    assert.ok(Number.isFinite(delay) && delay >= 1 && delay <= 25, `delay out of bounds: ${delay}`);
+  }
+  await fake.dispose();
+});
+
+test("a cleared numeric field falls back to its default instead of zero", async () => {
+  const fake = fakeContext();
+  // Number(null), Number("") and Number(false) are all 0; treating them as a
+  // configured zero would busy-loop instead of backing off.
+  plugin.apply(fake.ctx, { initialDelayMs: null, maxDelayMs: "", jitterRatio: false });
+
+  const payload = failurePayload();
+  const action = await fake.fire("agent/request-error", payload, async () => undefined);
+  assert.deepEqual(action, { kind: "retry" });
+  const delay = payload.agent.appended[0].data.delayMs;
+  // Default initial delay is 1000 with 20% jitter, so anything in the hundreds.
+  assert.ok(delay >= 500, `an absent delay must take the default, got ${delay}`);
+  await fake.dispose();
+});

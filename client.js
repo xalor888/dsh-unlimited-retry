@@ -597,6 +597,28 @@ window.__ModuleLoader__.load({
       ]);
     }
 
+    /**
+     * Parse a numeric field without trapping the user mid-edit.
+     *
+     * Clearing a number input yields "", and coercing that to 0 or 1 immediately
+     * rewrites the field the operator is trying to type into. An empty or
+     * unparseable entry therefore commits nothing; the draft keeps the last
+     * good value and the field stays editable.
+     * @param raw - the input's current value.
+     * @param min - smallest acceptable value.
+     * @param max - optional largest acceptable value.
+     * @returns the clamped integer, or undefined when the entry is not a number.
+     */
+    function parseField(raw, min, max) {
+      const text = String(raw ?? "").trim();
+      if (text.length === 0) return undefined;
+      const value = Number(text);
+      if (!Number.isFinite(value)) return undefined;
+      const clamped = Math.trunc(value);
+      const lower = Math.max(min, clamped);
+      return max === undefined ? lower : Math.min(max, lower);
+    }
+
     // ---------------------------------------------------------------------
     // Page
     // ---------------------------------------------------------------------
@@ -906,7 +928,9 @@ window.__ModuleLoader__.load({
                 value: config.maxAttempts === null || config.maxAttempts === undefined ? "" : String(config.maxAttempts),
                 onChange: (event) => {
                   const raw = event.target.value.trim();
-                  patch({ maxAttempts: raw.length === 0 ? null : Math.max(1, Math.trunc(Number(raw) || 1)) });
+                  // An empty field is a deliberate "no limit", not a failed entry.
+                  const parsed = raw.length === 0 ? null : parseField(raw, 1);
+                  if (raw.length === 0 || parsed !== undefined) patch({ maxAttempts: parsed });
                 },
               }),
               React.createElement("span", { key: "u", className: "duUnit" },
@@ -929,8 +953,8 @@ window.__ModuleLoader__.load({
                 disabled: !writable || pending || config.autoRetry !== true,
                 value: String(config.initialDelayMs ?? ""),
                 onChange: (event) => {
-                  const parsed = Math.max(1, Math.trunc(Number(event.target.value) || 1));
-                  patch({ initialDelayMs: parsed });
+                  const parsed = parseField(event.target.value, 1);
+                  if (parsed !== undefined) patch({ initialDelayMs: parsed });
                 },
               }),
               React.createElement("span", { key: "u", className: "duUnit" }, "ms"),
@@ -952,8 +976,8 @@ window.__ModuleLoader__.load({
                 disabled: !writable || pending || config.autoRetry !== true,
                 value: String(config.maxDelayMs ?? ""),
                 onChange: (event) => {
-                  const parsed = Math.max(1, Math.trunc(Number(event.target.value) || 1));
-                  patch({ maxDelayMs: parsed });
+                  const parsed = parseField(event.target.value, 1);
+                  if (parsed !== undefined) patch({ maxDelayMs: parsed });
                 },
               }),
               React.createElement("span", { key: "u", className: "duUnit" }, "ms"),
@@ -977,8 +1001,8 @@ window.__ModuleLoader__.load({
                 disabled: !writable || pending || config.autoRetry !== true,
                 value: String(Math.round((config.jitterRatio ?? 0) * 100)),
                 onChange: (event) => {
-                  const parsed = Math.min(100, Math.max(0, Math.trunc(Number(event.target.value) || 0)));
-                  patch({ jitterRatio: parsed / 100 });
+                  const parsed = parseField(event.target.value, 0, 100);
+                  if (parsed !== undefined) patch({ jitterRatio: parsed / 100 });
                 },
               }),
               React.createElement("span", { key: "u", className: "duUnit" }, "%"),

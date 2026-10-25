@@ -283,7 +283,19 @@ const CHAIN_SCHEMA = await (async () => {
 /** The schema export is optional; absence only removes the advertised form. */
 export const Config = await loadConfigSchema();
 
+/**
+ * Read a number, falling back for anything that is not one.
+ *
+ * `Number(null)` is `0` and `Number("")` is `0`, so a plain `Number()` coercion
+ * turns an absent or cleared field into zero — a clearing edit would silently
+ * mean "set to zero", which for a delay is a busy loop and for a ratio is no
+ * jitter at all. Absent means absent, so it takes the fallback.
+ * @param value - the raw configured value.
+ * @param fallback - value to use when `value` is not a usable number.
+ * @returns a finite number.
+ */
 function finite(value, fallback) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -325,8 +337,13 @@ function canonicalCodeSet(codes) {
  */
 function normalize(raw) {
   const source = raw !== null && typeof raw === "object" ? raw : {};
-  const initialDelayMs = Math.max(1, Math.round(finite(source.initialDelayMs, DEFAULTS.initialDelayMs)));
-  const maxDelayMs = Math.max(initialDelayMs, Math.round(finite(source.maxDelayMs, DEFAULTS.maxDelayMs)));
+  const requestedInitial = Math.max(1, Math.round(finite(source.initialDelayMs, DEFAULTS.initialDelayMs)));
+  const maxDelayMs = Math.max(1, Math.round(finite(source.maxDelayMs, DEFAULTS.maxDelayMs)));
+  // `maxDelayMs` is a CEILING, so it wins a conflict. Raising it to fit an
+  // oversized `initialDelayMs` would silently override the one setting an
+  // operator uses to bound the whole plugin: asking for a 10 ms ceiling and
+  // getting a 90 s first wait is the opposite of what that setting says.
+  const initialDelayMs = Math.min(requestedInitial, maxDelayMs);
   const jitterRatio = Math.min(1, Math.max(0, finite(source.jitterRatio, DEFAULTS.jitterRatio)));
 
   const rawAttempts = source.maxAttempts;

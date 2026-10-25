@@ -442,3 +442,16 @@ test("the code input offers the real Harness vocabulary as suggestions", async (
   assert.match(html, /value="TIMEOUT"/);
   assert.match(html, /value="RATE_LIMIT"/);
 });
+
+test("clearing a numeric field does not rewrite it while typing", async () => {
+  const source = await readFile(CLIENT_PATH, "utf8");
+  // A committed value of 0 or 1 on every keystroke makes a field impossible to
+  // retype: the operator deletes the contents and it immediately refills.
+  assert.match(source, /function parseField\(raw, min, max\)/);
+  assert.doesNotMatch(
+    source,
+    /Number\(event\.target\.value\) \|\| 1/,
+    "no handler may coerce an empty field to 1",
+  );
+  assert.match(source, /if \(parsed !== undefined\) patch\(/);
+});
