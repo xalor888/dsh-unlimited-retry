@@ -38,10 +38,12 @@
     "icon.svg",
     "README.md",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "assets/icon-180.png"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-0 <0.3.0-0"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs"
@@ -52,7 +54,8 @@
   },
   "devDependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "semver": "^7.8.5"
   },
   "dsh": {
     "bundle": {

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xalor888/dsh-unlimited-retry/actions/workflows/ci.yml/badge.svg)](https://github.com/xalor888/dsh-unlimited-retry/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-unlimited-retry.svg)](https://www.npmjs.com/package/dsh-unlimited-retry)
-[![license](https://img.shields.io/npm/l/dsh-unlimited-retry.svg)](LICENSE)
+[![license](https://img.shields.io/github/license/xalor888/dsh-unlimited-retry.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-unlimited-retry.svg)](package.json)
 
 DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实时设置面板。
@@ -258,8 +258,13 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 
 ## 兼容性
 
-- Node.js 20 及以上。
-- DSH 0.2.x（凡带 `dsh-agent-loop` 与 `dsh-llm-retry` 的版本）。
+| 依赖 | 要求 |
+|---|---|
+| Node.js | **>= 20** |
+| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行） |
+| 带 `dsh-agent-loop` 与 `dsh-llm-retry` | 是（重试监听器挂在那条事件上） |
+
+`engines.dsh` 的 `-0` 下界是刻意的：宿主的预检用 `includePrerelease: true` 匹配，而只有带预发布标签的边界才能放行 `0.2.1-rc.3` 这样的预发布运行时。写成 `>=0.2.0` 会把所有 `-rc` 版本静默排除。
 - 有 `AbortSignal.any` 就用它，没有则用 controller 方案等价实现。
 - 1.x 的 `config` 仍可挂载：`retryAllCodes` 被忽略（除非显式排除，否则每个码都会重试），`terminalCodes` 按 `excludeCodes` 读取，两者各打一条替代提示。
 - Web 面板另需 `configEditor` 与 `settings.section` 槽位；缺这些时策略照常生效，页面只是不存在或只读。

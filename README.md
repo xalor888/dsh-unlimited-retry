@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xalor888/dsh-unlimited-retry/actions/workflows/ci.yml/badge.svg)](https://github.com/xalor888/dsh-unlimited-retry/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-unlimited-retry.svg)](https://www.npmjs.com/package/dsh-unlimited-retry)
-[![license](https://img.shields.io/npm/l/dsh-unlimited-retry.svg)](LICENSE)
+[![license](https://img.shields.io/github/license/xalor888/dsh-unlimited-retry.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-unlimited-retry.svg)](package.json)
 
 Unbounded model-request retry for the DeepSeek Harness agent loop, with a live
@@ -338,8 +338,16 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 
 ## Compatibility
 
-- Node.js 20 or newer.
-- DSH 0.2.x (any version shipping `dsh-agent-loop` and `dsh-llm-retry`).
+| Requirement | Value |
+|---|---|
+| Node.js | **>= 20** |
+| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight) |
+| Ships `dsh-agent-loop` and `dsh-llm-retry` | Yes — the retry listener hangs off that event |
+
+The `-0` lower bound in `engines.dsh` is deliberate: the host matches with
+`includePrerelease: true`, and only a boundary carrying a prerelease tag admits a
+prerelease runtime such as `0.2.1-rc.3`. A plain `>=0.2.0` would silently exclude
+every `-rc` build.
 - `AbortSignal.any` is used when present; a controller-based fallback covers runtimes without it.
 - A 1.x `config` still mounts: `retryAllCodes` is ignored and `terminalCodes` is read as `excludeCodes`, each with a one-line warning naming the replacement.
 - The Web panel additionally needs `configEditor` and the `settings.section` slot. Without them the policy still applies; the page is simply absent or read-only.

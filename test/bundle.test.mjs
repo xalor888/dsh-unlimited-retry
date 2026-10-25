@@ -161,6 +161,24 @@ test("every README badge points at an endpoint that answers for this package", a
     // The engine badge has exactly one correct endpoint.
     assert.match(text, /img\.shields\.io\/node\/v\/dsh-unlimited-retry\.svg/, `${file}: engine badge`);
     assert.match(text, /img\.shields\.io\/npm\/v\/dsh-unlimited-retry\.svg/, `${file}: version badge`);
-    assert.match(text, /img\.shields\.io\/npm\/l\/dsh-unlimited-retry\.svg/, `${file}: license badge`);
+    assert.match(text, /img\.shields\.io\/github\/license\/xalor888\/dsh-unlimited-retry\.svg/, `${file}: license badge`);
   }
+});
+
+test("the manifest declares the DSH range the host enforces", async () => {
+  const manifest = JSON.parse(await read("package.json"));
+  const range = manifest.engines?.dsh;
+  assert.equal(typeof range, "string", "engines.dsh is what the host's compatibility preflight reads");
+
+  const semver = (await import("node:module")).createRequire(import.meta.url)("semver");
+  // The tested runtime, and its prerelease form, must both satisfy the range.
+  // A lower bound without `-0` silently excludes every prerelease build.
+  for (const runtime of ["0.2.0", "0.2.1-rc.3"]) {
+    assert.ok(
+      semver.satisfies(runtime, range, { includePrerelease: true }),
+      `${runtime} must satisfy engines.dsh ${range}`,
+    );
+  }
+  // A future major must not be silently claimed.
+  assert.ok(!semver.satisfies("0.3.0", range, { includePrerelease: true }));
 });
