@@ -137,3 +137,30 @@ test("a LICENSE file ships with the package", async () => {
   assert.match(text, /MIT License/);
   assert.match(text, /Permission is hereby granted/);
 });
+
+// ---------------------------------------------------------------------------
+// README badges.
+//
+// A broken badge is invisible in review and obvious to every visitor: the wrong
+// shields.io endpoint renders a red "404 badge not found" rather than failing
+// anything. The `dependency-version` endpoint was used for a while to show
+// `engines.node`, which it cannot do — it queries a dependency version.
+// ---------------------------------------------------------------------------
+
+test("every README badge points at an endpoint that answers for this package", async () => {
+  for (const file of ["README.md", "README.zh.md"]) {
+    const text = await read(file);
+    const badges = [...text.matchAll(/https:\/\/img\.shields\.io(\/[^)\s]*)/g)].map((match) => match[1]);
+    assert.ok(badges.length >= 3, `${file} should carry the headline badges`);
+
+    for (const path of badges) {
+      // `dependency-version` is for a dependency's version, not engines.
+      assert.doesNotMatch(path, /dependency-version/, `${file}: use /node/v/ for the engine range`);
+    }
+
+    // The engine badge has exactly one correct endpoint.
+    assert.match(text, /img\.shields\.io\/node\/v\/dsh-unlimited-retry\.svg/, `${file}: engine badge`);
+    assert.match(text, /img\.shields\.io\/npm\/v\/dsh-unlimited-retry\.svg/, `${file}: version badge`);
+    assert.match(text, /img\.shields\.io\/npm\/l\/dsh-unlimited-retry\.svg/, `${file}: license badge`);
+  }
+});
