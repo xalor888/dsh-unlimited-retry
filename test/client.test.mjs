@@ -189,7 +189,6 @@ test("the page renders a live snapshot without touching the DOM", async () => {
     error: null,
     errorCode: null,
     fetchedAt: Date.now(),
-    everLoaded: true,
     consecutiveFailures: 0,
   };
   const useFeed = () => snapshot;
@@ -216,7 +215,6 @@ test("the page renders Chinese copy when the locale is Chinese", async () => {
     error: null,
     errorCode: null,
     fetchedAt: Date.now(),
-    everLoaded: true,
     consecutiveFailures: 0,
   };
   const zhContext = fakeClientContext("zh");
@@ -247,7 +245,6 @@ test("an unreachable host renders an error state instead of crashing", async () 
       error: "Failed to fetch",
       errorCode: null,
       fetchedAt: 0,
-      everLoaded: false,
       consecutiveFailures: 5,
     }),
   }));
@@ -272,7 +269,6 @@ test("a read-only composition disables writes but still renders the policy", asy
       error: null,
       errorCode: null,
       fetchedAt: Date.now(),
-      everLoaded: true,
       consecutiveFailures: 0,
     }),
   }));
@@ -303,7 +299,6 @@ test("the empty activity state is explicit rather than blank", async () => {
       error: null,
       errorCode: null,
       fetchedAt: Date.now(),
-      everLoaded: true,
       consecutiveFailures: 0,
     }),
   }));
@@ -352,7 +347,7 @@ function sampleSnapshot() {
       recordSessionEvents: true,
       log: true,
     },
-    capabilities: { unlimited: true, retriesEveryCode: false, canWriteConfig: true, canReset: true },
+    capabilities: { unlimited: true, retriesEveryCode: false, canWriteConfig: true },
     ladder: [{ attempt: 1, delayMs: 1000, clamped: false }, { attempt: 2, delayMs: 2000, clamped: false }],
     recommendedExclude: ["AUTH", "QUOTA", "CONTEXT_OVERFLOW"],
     knownFailureCodes: ["ABORTED", "RATE_LIMIT", "TIMEOUT", "TRANSPORT"],
@@ -394,7 +389,6 @@ test("a reload right after a save is not reported as an outage", async () => {
       error: "Failed to fetch",
       errorCode: null,
       fetchedAt: Date.now(),
-      everLoaded: true,
       consecutiveFailures: 1,
     }),
   }));
@@ -418,7 +412,6 @@ test("the panel explains the always-terminal rule instead of hiding it", async (
       error: null,
       errorCode: null,
       fetchedAt: Date.now(),
-      everLoaded: true,
       consecutiveFailures: 0,
     }),
   }));
@@ -442,7 +435,6 @@ test("the code input offers the real Harness vocabulary as suggestions", async (
       error: null,
       errorCode: null,
       fetchedAt: Date.now(),
-      everLoaded: true,
       consecutiveFailures: 0,
     }),
   }));

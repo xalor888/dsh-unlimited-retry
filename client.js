@@ -58,7 +58,6 @@ window.__ModuleLoader__.load({
       ladderTitle: "Effective retry ladder",
       ladderHint: "Earlier layers get the first word. This plugin only handles what nobody recovered.",
       ladderProvider: "Provider retry policy",
-      ladderProviderFallback: "Provider policy",
       ladderPlugin: "This plugin",
       ladderBeyond: "and beyond, every delay capped at {max}",
       ladderCap: "up to attempt {n}",
@@ -91,7 +90,6 @@ window.__ModuleLoader__.load({
       excludeUnknown: "Enter a failure code first.",
       alwaysTerminal: "{codes} always stay terminal: a cancellation is not a fault, so it is never retried.",
       excludeDuplicate: "{code} is already listed.",
-      distributions: "Breakdown",
       byCode: "By failure code",
       byProvider: "By provider",
       terminalSeen: "Left to the loop",
@@ -147,7 +145,6 @@ window.__ModuleLoader__.load({
       ladderTitle: "实际重试顺序",
       ladderHint: "越靠前的恢复层越先决定，本插件只处理没人接手的失败。",
       ladderProvider: "Provider 重试策略",
-      ladderProviderFallback: "Provider 策略",
       ladderPlugin: "本插件",
       ladderBeyond: "此后每一次延迟都封顶 {max}",
       ladderCap: "至第 {n} 次",
@@ -180,7 +177,6 @@ window.__ModuleLoader__.load({
       excludeUnknown: "请先输入错误码。",
       alwaysTerminal: "{codes} 始终终止：取消不是故障，因此永不重试。",
       excludeDuplicate: "已经包含 {code}。",
-      distributions: "分布",
       byCode: "按错误码",
       byProvider: "按 provider",
       terminalSeen: "交回上层",
@@ -448,7 +444,6 @@ window.__ModuleLoader__.load({
         error: null,
         errorCode: null,
         fetchedAt: 0,
-        everLoaded: false,
         consecutiveFailures: 0,
       });
 
@@ -468,7 +463,6 @@ window.__ModuleLoader__.load({
             state.error = null;
             state.errorCode = null;
             state.fetchedAt = Date.now();
-            state.everLoaded = true;
             state.consecutiveFailures = 0;
           });
         } catch (error) {
@@ -644,7 +638,7 @@ window.__ModuleLoader__.load({
       }, [serverConfig === null ? null : JSON.stringify(serverConfig)]);
 
       const capabilities = data?.capabilities ?? {};
-      const writable = capabilities.canWriteConfig === true && capabilities.canReset !== false;
+      const writable = capabilities.canWriteConfig === true;
       const dirty = draft !== null && serverConfig !== null && JSON.stringify(draft) !== JSON.stringify(serverConfig);
 
       const patch = React.useCallback((changes) => {

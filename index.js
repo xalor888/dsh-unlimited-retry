@@ -885,7 +885,6 @@ export function apply(ctx, config) {
         unlimited: cfg.maxAttempts === null,
         retriesEveryCode: cfg.excludeCodes.size === 0,
         canWriteConfig: typeof ctx.get?.("configEditor")?.edit === "function",
-        canReset: true,
       },
       ladder: ladder(),
       recommendedExclude: [...RECOMMENDED_EXCLUDE],
@@ -983,7 +982,12 @@ export function apply(ctx, config) {
     if (downstream?.kind === "retry") return downstream;
 
     const { agent, turn, step, provider, failure, signal, retryPolicy } = payload ?? {};
-    if (agent === undefined || failure === undefined) return downstream;
+    // `typeof` rather than a truthiness test: a `null` payload field must be
+    // rejected here, not dereferenced below. This listener sits in a waterfall
+    // the agent loop awaits without a catch of its own, so throwing here would
+    // replace the provider's failure with a TypeError and lose the real error.
+    if (typeof agent !== "object" || agent === null) return downstream;
+    if (typeof failure !== "object" || failure === null) return downstream;
     if (!cfg.retryWithoutProviderPolicy && retryPolicy === undefined) return downstream;
     if (signal?.aborted || lifetime.signal.aborted) return downstream;
 

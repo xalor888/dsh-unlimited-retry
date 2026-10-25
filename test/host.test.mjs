@@ -804,3 +804,95 @@ test("concurrent waits in one step each get their own attempt number", async () 
   assert.deepEqual(attempts, [1, 2], "two concurrent waits are attempts 1 and 2, not both 1");
   await fake.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// Hostile and malformed input.
+//
+// This listener sits in a waterfall the agent loop awaits with no catch of its
+// own, so an exception here would replace the provider's real failure with a
+// TypeError and lose the error the user needed to see. Every field is treated as
+// untrusted.
+// ---------------------------------------------------------------------------
+
+test("a malformed failure is delegated, never thrown from the waterfall", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  const signal = new AbortController().signal;
+  const session = { id: "s", append: () => {} };
+  const hostile = [
+    null,
+    undefined,
+    {},
+    { agent: { session }, failure: null, signal },
+    { agent: { session }, failure: "boom", signal },
+    { agent: { session }, failure: 42, signal },
+    { agent: null, failure: { code: "NETWORK" }, signal },
+    { agent: "not-an-agent", failure: { code: "NETWORK" }, signal },
+    { agent: { session }, failure: { message: "x", code: 42 }, signal },
+    { agent: { session }, failure: { message: "x", code: "" }, signal },
+    { agent: { session }, failure: { message: "x", code: "NETWORK" } },
+    { agent: { session }, failure: { message: "x", code: "NETWORK" }, signal: null },
+  ];
+
+  for (const payload of hostile) {
+    const action = await fake.fire("agent/request-error", payload, async () => undefined);
+    assert.ok(
+      action === undefined || action?.kind === "retry",
+      `payload ${JSON.stringify(payload)} produced ${JSON.stringify(action)}`,
+    );
+  }
+  await fake.dispose();
+});
+
+test("an absurd provider delay cannot escape the ceiling", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 });
+
+  for (const providerRetryAfterMs of [1e15, Number.MAX_SAFE_INTEGER, Number.POSITIVE_INFINITY, -5, Number.NaN]) {
+    const payload = failurePayload("RATE_LIMITED", { providerRetryAfterMs });
+    const action = await fake.fire("agent/request-error", payload, async () => undefined);
+    assert.deepEqual(action, { kind: "retry" });
+    const recorded = payload.agent.appended[0].data.delayMs;
+    assert.ok(
+      Number.isFinite(recorded) && recorded >= 1 && recorded <= 5,
+      `providerRetryAfterMs ${providerRetryAfterMs} produced delay ${recorded}`,
+    );
+  }
+  await fake.dispose();
+});
+
+test("a failing config editor is reported, not thrown out of the route", async () => {
+  const routes = new Map();
+  const fake = fakeContext({
+    services: {
+      webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
+      connection: { requestRejection: () => undefined },
+      configEditor: {
+        entries() {
+          throw new Error("entries exploded");
+        },
+        edit() {
+          throw new Error("edit exploded");
+        },
+      },
+    },
+  });
+  plugin.apply(fake.ctx, {});
+
+  // The read model must survive an unusable editor and simply report read-only.
+  const stats = captureResponse();
+  routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), stats.res);
+  assert.equal(stats.status, 200);
+
+  const write = captureResponse();
+  await routes.get("/unlimited-retry/config").handler(
+    fakeRequest("POST", { "content-type": "application/json" }, JSON.stringify({ autoRetry: false })),
+    write.res,
+  );
+  // 409 is the specific answer: the row could not be resolved, which is a
+  // different condition from a malformed patch (400).
+  assert.ok(write.status === 400 || write.status === 409, `unexpected status ${write.status}`);
+  assert.match(JSON.parse(write.text()).code, /bad-request|not-addressable|no-editor/);
+  await fake.dispose();
+});
