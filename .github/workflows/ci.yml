@@ -85,6 +85,7 @@ jobs:
           README.md
           README.zh.md
           assets/icon-180.png
+          assets/icon-512.png
           client.js
           cordis.patch.yml
           icon.svg

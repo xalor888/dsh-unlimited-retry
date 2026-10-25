@@ -1,6 +1,6 @@
 {
   "name": "dsh-unlimited-retry",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "Unbounded model-request retry for the DeepSeek Harness agent loop, with a live Settings panel.",
   "keywords": [
     "deepseek",
@@ -39,7 +39,8 @@
     "README.md",
     "README.zh.md",
     "LICENSE",
-    "assets/icon-180.png"
+    "assets/icon-180.png",
+    "assets/icon-512.png"
   ],
   "engines": {
     "node": ">=20",
