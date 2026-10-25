@@ -20,7 +20,7 @@ DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实
 | 你要装在哪 | 安装方式 | 说明 |
 |---|---|---|
 | **DSH Web 界面** | `dsh plugin --profile web add dsh-unlimited-retry` | 推荐，装 npm 已发布版 |
-| **官方桌面客户端（Electron）** | 在桌面端会话里**让 DSH 自己装**，或在桌面端已初始化后：`dsh plugin --profile desktop add dsh-unlimited-retry` | ⚠️ `--profile desktop` 被 CLI 保留给桌面应用，必须先打开桌面端一次、生成 `~/.dsh/profiles/desktop`，然后**完全退出桌面端**再执行 |
+| **官方桌面客户端（Electron）** | 先打开桌面端一次、**完全退出**，再执行 `dsh plugin --profile desktop add dsh-unlimited-retry` | 然后重开桌面端生效。顺序不能省：未初始化的 desktop profile 会被拒绝，而不会退化成新建一个普通 CLI profile |
 
 > 为什么桌面端也能用：桌面端的 profile 就是 Web 模板（`base` + `web-app`），Electron 加载的是本地 Web UI 的 URL，因此 `dsh.client` 声明的面板在桌面端同样被 `client-modules` 装载。不需要另做一套客户端代码。
 

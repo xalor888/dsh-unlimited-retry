@@ -25,7 +25,7 @@ both surfaces.
 | Surface | Install | Note |
 |---|---|---|
 | **DSH Web UI** | `dsh plugin --profile web add dsh-unlimited-retry` | Recommended; installs the published npm version |
-| **Official desktop client (Electron)** | Ask DSH to install it from a desktop session, or, after the desktop has initialized its profile: `dsh plugin --profile desktop add dsh-unlimited-retry` | ⚠️ `--profile desktop` is reserved for the desktop app. Open the desktop client once so `~/.dsh/profiles/desktop` exists, then **fully quit it** before running the command |
+| **Official desktop client (Electron)** | Open the desktop client once, **fully quit it**, then run `dsh plugin --profile desktop add dsh-unlimited-retry` | Reopen the desktop client afterwards. The order matters: an uninitialized desktop profile is refused rather than being replaced by a fresh CLI profile |
 
 > Why the desktop works: the desktop profile *is* the Web template (`base` +
 > `web-app`), and Electron loads the local Web UI URL. The `dsh.client` panel is
