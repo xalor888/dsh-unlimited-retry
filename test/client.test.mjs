@@ -455,3 +455,62 @@ test("clearing a numeric field does not rewrite it while typing", async () => {
   );
   assert.match(source, /if \(parsed !== undefined\) patch\(/);
 });
+
+/**
+ * Presentation defects that only a rendered panel reveals.
+ *
+ * ARIA assertions passed while the panel printed two copies of a label and the
+ * toggle had no size — the first is invisible to a11y checks because both copies
+ * were real, and a zero-size control still has correct attributes.
+ */
+
+test("each switch row prints its label exactly once", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({ status: "ready", data: sampleSnapshot(), error: null, errorCode: null, fetchedAt: Date.now(), consecutiveFailures: 0 }),
+  }));
+
+  // The row label and the Switch's own copy used to both render, so the visible
+  // text appeared twice. Count the label nodes, not the aria references.
+  for (const label of ["Retry enabled", "Retry without a provider policy"]) {
+    const occurrences = html.split(label).length - 1;
+    assert.equal(occurrences, 1, `"${label}" must appear once, saw ${occurrences}`);
+  }
+});
+
+test("the embedded switch points aria at the row label instead of duplicating it", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({ status: "ready", data: sampleSnapshot(), error: null, errorCode: null, fetchedAt: Date.now(), consecutiveFailures: 0 }),
+  }));
+
+  // The reference must resolve to an element that exists, or the control is unnamed.
+  const refs = [...html.matchAll(/aria-labelledby="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(refs.length > 0, "the toggles must be labelled");
+  for (const ref of refs) {
+    assert.match(html, new RegExp(`id="${ref}"`), `aria-labelledby="${ref}" must resolve to a real element`);
+  }
+});
+
+test("the toggle has the base style a zero-size button would lack", async () => {
+  const source = await readFile(CLIENT_PATH, "utf8");
+  // Only modifier rules existed at one point: background on [aria-checked], the
+  // knob offset, focus ring — but no width/height, so the control rendered as an
+  // invisible zero-size button while every attribute stayed correct.
+  assert.match(source, /\.duSwitch \{[^}]*width: 40px/, "base .duSwitch must size itself");
+  assert.match(source, /\.duSwitch \{[^}]*height: 22px/, "base .duSwitch must size itself");
+  assert.match(source, /\.duSwitch::after \{[^}]*width: 14px/, "the knob must have a size");
+  assert.match(source, /\.duSwitch::after \{[^}]*height: 14px/, "the knob must have a size");
+});

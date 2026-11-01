@@ -497,40 +497,62 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
     // Controls
     // ---------------------------------------------------------------------
-    function Switch({ id, checked, disabled, onChange, label, hint }) {
-      const labelId = `${id}-label`;
-      const hintId = `${id}-hint`;
+    /**
+     * A toggle.
+     *
+     * Two shapes: a standalone one that renders its own label and hint, and an
+     * embedded one (`labelId` set) that renders only the control because the
+     * surrounding {@link Field} already renders that copy. Rendering it in both
+     * places printed the label twice.
+     * @param props - state, change handler, and either `label`/`hint` or `labelId`.
+     * @returns the toggle element.
+     */
+    function Switch({ id, checked, disabled, onChange, label, hint, labelId, describedById }) {
+      const ownLabelId = `${id}-label`;
+      const ownHintId = `${id}-hint`;
+      const embedded = labelId !== undefined;
+      const button = React.createElement("button", {
+        key: "switch",
+        type: "button",
+        role: "switch",
+        id,
+        className: "duSwitch",
+        "aria-checked": checked === true,
+        "aria-labelledby": embedded ? labelId : ownLabelId,
+        "aria-describedby": embedded ? describedById : (hint === undefined ? undefined : ownHintId),
+        disabled: disabled === true,
+        onClick: () => onChange(checked !== true),
+      });
+      if (embedded) return button;
       return React.createElement("div", {
         style: { display: "flex", alignItems: "flex-start", gap: 10 },
       }, [
-        React.createElement("button", {
-          key: "switch",
-          type: "button",
-          role: "switch",
-          id,
-          className: "duSwitch",
-          "aria-checked": checked === true,
-          "aria-labelledby": labelId,
-          "aria-describedby": hint === undefined ? undefined : hintId,
-          disabled: disabled === true,
-          onClick: () => onChange(checked !== true),
-        }),
+        button,
         React.createElement("div", { key: "text", style: { minWidth: 0 } }, [
-          React.createElement("div", { key: "l", className: "duFieldLabel", id: labelId }, label),
+          React.createElement("div", { key: "l", className: "duFieldLabel", id: ownLabelId }, label),
           hint === undefined
             ? null
-            : React.createElement("div", { key: "h", className: "duFieldHint", id: hintId }, hint),
+            : React.createElement("div", { key: "h", className: "duFieldHint", id: ownHintId }, hint),
         ]),
       ]);
     }
 
+    /**
+     * One label/control row.
+     *
+     * The label and hint carry stable ids (`<id>-label`, `<id>-hint`) so a control
+     * that renders no text of its own can point at them instead of repeating the
+     * copy. Two copies of the same label is what happens when both sides render it.
+     * @param props - row id, label, optional hint, and the control.
+     * @returns the row element.
+     */
     function Field({ id, label, hint, children }) {
       return React.createElement("div", { className: "duField" }, [
         React.createElement("div", { key: "label" }, [
-          React.createElement("label", { key: "l", className: "duFieldLabel", htmlFor: id }, label),
+          React.createElement("label", { key: "l", className: "duFieldLabel", id: `${id}-label`, htmlFor: id }, label),
           hint === undefined
             ? null
-            : React.createElement("div", { key: "h", className: "duFieldHint" }, hint),
+            : React.createElement("div", { key: "h", className: "duFieldHint", id: `${id}-hint` }, hint),
         ]),
         React.createElement("div", { key: "body", className: "duFieldBody" }, children),
       ]);
@@ -895,19 +917,19 @@ window.__ModuleLoader__.load({
         React.createElement("div", { key: "hint", className: "duCardHint" }, t("policyHint")),
         React.createElement("div", { key: "b", className: "duCardBody" },
           React.createElement("div", { className: "duFields" }, [
-            React.createElement("div", { key: "enabled", className: "duField" }, [
-              React.createElement("div", { key: "l", className: "duFieldLabel" }, t("enabled")),
-              React.createElement("div", { key: "b", className: "duFieldBody" },
-                React.createElement(Switch, {
-                  id: "du-enabled",
-                  checked: config.autoRetry === true,
-                  disabled: !writable || pending,
-                  onChange: (next) => patch({ autoRetry: next }),
-                  label: t("enabled"),
-                  hint: t("enabledHint"),
-                }),
-              ),
-            ]),
+            React.createElement(Field, {
+              key: "enabled",
+              id: "du-enabled",
+              label: t("enabled"),
+              hint: t("enabledHint"),
+            }, React.createElement(Switch, {
+                id: "du-enabled",
+                checked: config.autoRetry === true,
+                disabled: !writable || pending,
+                onChange: (next) => patch({ autoRetry: next }),
+                labelId: "du-enabled-label",
+                describedById: "du-enabled-hint",
+              })),
 
             React.createElement(Field, {
               key: "attempts",
@@ -1008,33 +1030,33 @@ window.__ModuleLoader__.load({
               React.createElement("span", { key: "u", className: "duUnit" }, "%"),
             ]),
 
-            React.createElement("div", { key: "without", className: "duField" }, [
-              React.createElement("div", { key: "l", className: "duFieldLabel" }, t("withoutPolicy")),
-              React.createElement("div", { key: "b", className: "duFieldBody" },
-                React.createElement(Switch, {
-                  id: "du-without-policy",
-                  checked: config.retryWithoutProviderPolicy === true,
-                  disabled: !writable || pending,
-                  onChange: (next) => patch({ retryWithoutProviderPolicy: next }),
-                  label: t("withoutPolicy"),
-                  hint: t("withoutPolicyHint"),
-                }),
-              ),
-            ]),
+            React.createElement(Field, {
+              key: "without",
+              id: "du-without-policy",
+              label: t("withoutPolicy"),
+              hint: t("withoutPolicyHint"),
+            }, React.createElement(Switch, {
+                id: "du-without-policy",
+                checked: config.retryWithoutProviderPolicy === true,
+                disabled: !writable || pending,
+                onChange: (next) => patch({ retryWithoutProviderPolicy: next }),
+                labelId: "du-without-policy-label",
+                describedById: "du-without-policy-hint",
+              })),
 
-            React.createElement("div", { key: "events", className: "duField" }, [
-              React.createElement("div", { key: "l", className: "duFieldLabel" }, t("recordEvents")),
-              React.createElement("div", { key: "b", className: "duFieldBody" },
-                React.createElement(Switch, {
-                  id: "du-record-events",
-                  checked: config.recordSessionEvents === true,
-                  disabled: !writable || pending,
-                  onChange: (next) => patch({ recordSessionEvents: next }),
-                  label: t("recordEvents"),
-                  hint: t("recordEventsHint"),
-                }),
-              ),
-            ]),
+            React.createElement(Field, {
+              key: "events",
+              id: "du-record-events",
+              label: t("recordEvents"),
+              hint: t("recordEventsHint"),
+            }, React.createElement(Switch, {
+                id: "du-record-events",
+                checked: config.recordSessionEvents === true,
+                disabled: !writable || pending,
+                onChange: (next) => patch({ recordSessionEvents: next }),
+                labelId: "du-record-events-label",
+                describedById: "du-record-events-hint",
+              })),
 
             React.createElement("div", { key: "codes", className: "duField" }, [
               React.createElement("div", { key: "l" }, [
