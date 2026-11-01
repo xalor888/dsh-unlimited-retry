@@ -18,6 +18,10 @@ delay ceiling — until it succeeds or you stop it.
 Standard DSH bundle plugin, one-command install. **The same package supports both
 the DSH Web UI and the official desktop client (Electron).**
 
+![The Settings panel: live retry counters, the effective retry ladder, and the policy editor](assets/screenshot-1.png)
+
+<sub>Figures above are sample data. The layout, copy, and controls are the plugin's own.</sub>
+
 ## Where to install it
 
 This repository maintains one product line (`main`). The same package supports
@@ -135,6 +139,8 @@ record with no matching `llm/retry-started`, which is exactly what happened.
 `unlimited-retry`, which cannot collide with a provider budget.
 
 ### Settings panel
+
+![The top of the panel: live status, counters, and the ladder showing where this plugin sits](assets/screenshot-2.png)
 
 - 📊 **Live status**: a pill shows whether the host half answers
 - 🔢 **Counters**: total retries, waits in flight, sessions retrying, last retry, uptime

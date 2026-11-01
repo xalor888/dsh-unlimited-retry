@@ -14,6 +14,10 @@ DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实
 
 标准 DSH bundle 插件，`dsh plugin` 一键安装。**同一个包同时支持 DSH Web 与官方桌面客户端**（Electron）。
 
+![设置面板：实时重试计数、实际重试阶梯、策略编辑器](assets/screenshot-1.png)
+
+<sub>图中数字为样例数据；布局、文案与控件均为插件本身。</sub>
+
 ## 装在哪里
 
 本仓库只维护一条产品线（`main`），同一个包同时支持两种界面。
@@ -100,6 +104,8 @@ DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的
 因此被中止或插件卸载取消的重试，会留下一条 `llm/retry` 而没有对应的 `llm/retry-started` —— 这恰好就是事实。`mode` 记为 `always`，`policyKey` 固定为 `unlimited-retry`，不会与 provider 的预算冲突。
 
 ### 设置面板
+
+![面板顶部：实时状态、计数器，以及标明本插件位置的重试阶梯](assets/screenshot-2.png)
 
 - 📊 **实时状态**：小标签显示宿主端是否有响应
 - 🔢 **计数器**：累计重试、等待中的请求、正在重试的会话、最近一次重试、运行时长

@@ -205,3 +205,33 @@ test("the DSH badge states the same range engines.dsh declares", async () => {
   }
   assert.ok(encoded.length > 0);
 });
+
+test("every README image points at a file in this repository", async () => {
+  // A relative image path that no longer exists renders as a broken box on the
+  // repository page and in the marketplace, and nothing else would catch it.
+  for (const file of ["README.md", "README.zh.md"]) {
+    const text = await read(file);
+    const images = [...text.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map((match) => match[1]);
+    assert.ok(images.length > 0, `${file} should show the panel`);
+    // Badges are hosted images and are checked separately; only the panel shots
+    // are expected to live in this repository.
+    const local = images.filter((target) => !/^https?:/.test(target));
+    assert.ok(local.length >= 1, `${file} should show the panel from this repository`);
+    for (const target of local) {
+      const exists = await read(target).then(() => true, () => false);
+      assert.ok(exists, `${file}: ${target} does not exist`);
+    }
+  }
+});
+
+test("the screenshots the marketplace reads are declared and present", async () => {
+  const declared = JSON.parse(await read("screenshots.json"));
+  assert.ok(Array.isArray(declared) && declared.length >= 1 && declared.length <= 8, "1-8 screenshots");
+  for (const target of declared) {
+    // Storefronts resolve these relative to this file, and reject a path that
+    // escapes the plugin directory.
+    assert.doesNotMatch(target, /^\/|\.\./, `${target} must stay inside the repository`);
+    const exists = await read(target).then(() => true, () => false);
+    assert.ok(exists, `${target} is declared but missing`);
+  }
+});
