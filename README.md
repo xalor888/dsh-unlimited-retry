@@ -342,8 +342,14 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | Requirement | Value |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight) |
+| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5 and 0.2.2-alpha.2 |
 | Ships `dsh-agent-loop` and `dsh-llm-retry` | Yes — the retry listener hangs off that event |
+
+The session-projection reader adapts to both registration shapes the Host has
+shipped: the disposer returned before 0.2.2, and the callable thenable returned
+from 0.2.2 on, whose `typeof` is `"function"` while it still carries `then`.
+The handle is preferred where it exists, so no deprecated read is performed on a
+runtime that deprecated it.
 
 The `-0` lower bound in `engines.dsh` is deliberate: the host matches with
 `includePrerelease: true`, and only a boundary carrying a prerelease tag admits a

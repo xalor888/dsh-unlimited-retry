@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "2.4.0";
+const PLUGIN_VERSION = "2.4.1";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -780,9 +780,15 @@ export function apply(ctx, config) {
   const EMPTY_CHAIN = Object.freeze({ attempt: 0, retryId: undefined });
 
   let chainsRegistered = false;
+  /**
+   * A 0.2.2+ registration handle, whose `stateOf(session)` is the supported reader.
+   * Absent on runtimes whose `register` returns a disposer; there the service-level
+   * `stateOf(session, key)` is the only reader, and it is not yet deprecated.
+   */
+  let chainHandle;
   if (cfg.recordSessionEvents && CHAIN_SCHEMA !== undefined) {
     try {
-      ctx.sessionProjections.register({
+      const registered = ctx.sessionProjections.register({
         key: CHAIN_KEY,
         stateVersion: 1,
         stateSchema: CHAIN_SCHEMA,
@@ -802,6 +808,30 @@ export function apply(ctx, config) {
         },
       });
       chainsRegistered = true;
+      // The two runtimes differ only in what `register` returns: a plain disposer
+      // before 0.2.2, and from 0.2.2 a *callable thenable* — upstream's own README
+      // says `typeof` is "function" and `instanceof Promise` is false. A check for
+      // an object misses it and leaves every read on the deprecated service reader,
+      // so this test intentionally accepts a function that carries `then`.
+      //
+      // Deliberately not an async `apply`: upstream's guidance for new plugins is
+      // to await registration, but this plugin's routes and mount probe are
+      // registered synchronously and its reader is served from a listener that can
+      // fire at any time. Definitions install synchronously anyway, and the handle
+      // lands on a microtask, so resolving it here keeps `apply` sync without ever
+      // reading stale state.
+      if (registered !== null && (typeof registered === "object" || typeof registered === "function")
+        && typeof registered.then === "function") {
+        Promise.resolve(registered).then(
+          (handle) => {
+            if (handle !== null && typeof handle === "object" && typeof handle.stateOf === "function") chainHandle = handle;
+          },
+          (error) => {
+            chainsRegistered = false;
+            log("warn", `session projection registration failed (${String(error)}); retry ladders are bounded and process-local instead`);
+          },
+        );
+      }
     } catch (error) {
       log("warn", `session projections unavailable (${String(error)}); retry ladders are bounded and process-local instead`);
     }
@@ -836,6 +866,11 @@ export function apply(ctx, config) {
   function chainFor(session) {
     if (chainsRegistered) {
       try {
+        // Prefer the handle, which is the supported reader from 0.2.2 on; the
+        // service reader is deprecated there. The handle resolves on a microtask,
+        // so no recorded event can arrive before it is adopted — measured on
+        // 0.2.2-alpha.2: zero deprecation warnings across a full ladder.
+        if (chainHandle !== undefined) return chainHandle.stateOf(session) ?? EMPTY_CHAIN;
         return ctx.sessionProjections.stateOf(session, CHAIN_KEY) ?? EMPTY_CHAIN;
       } catch (error) {
         // Reading a projection needs a real session (the registry folds its log

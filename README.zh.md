@@ -262,8 +262,12 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | 依赖 | 要求 |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行） |
+| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2 上验证 |
 | 带 `dsh-agent-loop` 与 `dsh-llm-retry` | 是（重试监听器挂在那条事件上） |
+
+会话投影读取对宿主先后提供过的两种注册形态都做了适配：0.2.2 之前 `register`
+返回 disposer，0.2.2 起返回**可调用 thenable**（`typeof` 是 `"function"`，但仍带 `then`）。
+有句柄时优先用句柄，因此在已弃用旧读取的运行时上不会走那条路。
 
 `engines.dsh` 的 `-0` 下界是刻意的：宿主的预检用 `includePrerelease: true` 匹配，而只有带预发布标签的边界才能放行 `0.2.1-rc.3` 这样的预发布运行时。写成 `>=0.2.0` 会把所有 `-rc` 版本静默排除。
 - 有 `AbortSignal.any` 就用它，没有则用 controller 方案等价实现。

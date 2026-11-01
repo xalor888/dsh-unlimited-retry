@@ -63,9 +63,30 @@ function fakeContext(options = {}) {
   services.set("sessionProjections", {
     register(definition) {
       projections.set(definition.key, definition);
+      if (options.modernProjections === true) {
+        // 0.2.2 shape, faithfully: a CALLABLE thenable. `typeof` reports "function"
+        // while it still carries `then`, and a detector that only accepts objects
+        // silently misses it — which is how the handle was first not adopted.
+        const handle = {
+          stateOf: (session) => {
+            const id = session?.id ?? "unidentified-session";
+            return projectionCells.get(id)?.get(definition.key) ?? definition.init();
+          },
+          readerFor: (session) => () => handle.stateOf(session),
+        };
+        const thenable = () => undefined;
+        thenable.then = (onFulfilled, onRejected) => Promise.resolve(handle).then(onFulfilled, onRejected);
+        thenable.catch = (onRejected) => Promise.resolve(handle).catch(onRejected);
+        return thenable;
+      }
       return () => projections.delete(definition.key);
     },
     stateOf(session, key) {
+      // From 0.2.2 this reader is deprecated. Fail loudly if the plugin reaches for
+      // it when a handle was available, so the adaptive path cannot silently regress.
+      if (options.modernProjections === true) {
+        throw new Error("deprecated stateOf(session, key) used while a handle was available");
+      }
       const definition = projections.get(key);
       if (definition === undefined) return undefined;
       const id = session?.id ?? "unidentified-session";
@@ -970,5 +991,58 @@ test("a cleared numeric field falls back to its default instead of zero", async 
   const delay = payload.agent.appended[0].data.delayMs;
   // Default initial delay is 1000 with 20% jitter, so anything in the hundreds.
   assert.ok(delay >= 500, `an absent delay must take the default, got ${delay}`);
+  await fake.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Projection reader across runtime shapes.
+//
+// 0.2.2 changed what `register` returns: a disposer before, a thenable yielding a
+// handle after. The service-level `stateOf(session, key)` still works there but
+// logs a deprecation warning on every call, and one read per request failure would
+// flood the log. These tests pin both shapes so neither runtime regresses.
+// ---------------------------------------------------------------------------
+
+test("a handle-returning registry is read through the handle, not the deprecated reader", async () => {
+  // The double throws if the deprecated reader is touched, so passing proves the
+  // plugin switched over.
+  const fake = fakeContext({ modernProjections: true });
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
+
+  const projection = fake.services.get("sessionProjections");
+  const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
+  const agent = fakeAgent("modern-1", projection, emit);
+
+  // Let the registration's thenable settle so the handle is adopted.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
+  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
+  assert.equal(
+    await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined),
+    undefined,
+    "the handle-backed ladder still enforces maxAttempts",
+  );
+
+  agent.session.append("step/start", { turn: 2, step: 1 });
+  assert.deepEqual(
+    await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined),
+    { kind: "retry" },
+    "and still resets per step",
+  );
+  await fake.dispose();
+});
+
+test("a disposer-returning registry keeps using the service reader", async () => {
+  const fake = fakeContext(); // legacy shape, the one 0.2.1-rc.5 ships
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
+
+  const projection = fake.services.get("sessionProjections");
+  const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
+  const agent = fakeAgent("legacy-1", projection, emit);
+
+  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
+  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
+  assert.equal(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), undefined);
   await fake.dispose();
 });
