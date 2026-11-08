@@ -67,9 +67,18 @@ jobs:
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && !inputs.dry-run)
         # --provenance needs the id-token permission above and a public repo.
-        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          # A version cannot be republished, and a re-run after a later step failed
+          # must not die here. Checking first makes the job converge instead of
+          # forcing a manual publish that then blocks the remaining steps.
+          if npm view "dsh-unlimited-retry@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::$VERSION is already on the registry; skipping the publish step."
+            exit 0
+          fi
+          npm publish --provenance --access public
 
       - name: Create the GitHub release
         if: startsWith(github.ref, 'refs/tags/')
