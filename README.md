@@ -29,36 +29,35 @@ both surfaces.
 
 | Surface | Install |
 |---|---|
-| **DSH Web UI** | Terminal: `dsh plugin --profile web add dsh-unlimited-retry` |
-| **Official desktop client (Electron)** | **No terminal** — ask the desktop session to install it with the built-in `plugin_manager` (below) |
+| **DSH Web UI** | Open the **Plugins** page, click **Add plugin**, and enter `dsh-unlimited-retry` — or run `dsh plugin --profile web add dsh-unlimited-retry` in a terminal |
+| **Official desktop client (Electron)** | Open the **Plugins** page, click **Add plugin**, and enter `dsh-unlimited-retry` |
 
-### Desktop client: do not use a terminal command
+### Installing from the UI
 
-The desktop reads the **`desktop` profile**, and the CLI refuses to touch it by
-design:
+Both surfaces ship the plugin manager, so the shortest path is the same:
+
+1. Open **Plugins** in the app.
+2. Click **Add plugin**.
+3. Enter `dsh-unlimited-retry` (or `dsh-unlimited-retry@<version>` to pin one).
+4. Confirm, then reopen the app or reload the page if the Settings page does not
+   appear immediately.
+
+The dialog accepts npm packages, Git repositories, and local directories, so the
+same box also takes `github:xalor888/dsh-unlimited-retry` or a `link:` path.
+
+### Why the desktop must not use `dsh plugin --profile desktop`
+
+The desktop client reads a profile named `desktop`, which is reserved for the
+Electron application — the CLI refuses to touch it on purpose:
 
 ```
 error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-A `--profile web` install therefore lands in the `web` profile, and the desktop
-window reads none of it — the symptom is a Settings page that simply is not there,
-with nothing in the console.
-
-**Instead**, say this in a desktop-client session:
-
-> Please install `dsh-unlimited-retry` using this host's built-in
-> `plugin_manager`. Check the current profile and whether a package of that name
-> is already installed first; if it is, report its source and version. Then tell
-> me the result and whether a restart is needed.
-
-`plugin_manager` is scoped to the **current profile** (the desktop's is
-`desktop`) and uses the host's own package manager to install and register the
-plugin. No terminal, no cookie construction, no hand-editing a host-managed
-profile file. Pin a version by asking for `dsh-unlimited-retry@<version>`.
-
-If Settings does not show the page after a first install, **fully quit the client
-(including the tray) and reopen it** rather than stacking a second install.
+A `--profile web` install therefore lands in the `web` profile, while the desktop
+window reads `desktop`, so nothing appears. The UI path above is scoped to
+whichever profile the running app actually owns, which is why it is the one to
+use.
 
 > Why the desktop works: the desktop profile *is* the Web template (`base` +
 > `web-app`), and Electron loads the local Web UI URL. The `dsh.client` panel is
@@ -220,8 +219,8 @@ no jitter at all.
 dsh plugin --profile web add dsh-unlimited-retry
 ```
 
-For the official desktop client, use the built-in `plugin_manager` from a desktop
-session instead — see [Where to install it](#where-to-install-it). The CLI refuses
+For the official desktop client, use the in-app **Plugins → Add plugin** dialog
+instead — see [Where to install it](#where-to-install-it). The CLI refuses
 `--profile desktop` by design.
 
 ### From this repository
@@ -348,7 +347,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | Requirement | Value |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5 and 0.2.2-alpha.2 |
+| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5, 0.2.2-alpha.2 and 0.2.2-rc.1 |
 | Ships `dsh-agent-loop` and `dsh-llm-retry` | Yes — the retry listener hangs off that event |
 
 The session-projection reader adapts to both registration shapes the Host has
@@ -364,6 +363,20 @@ every `-rc` build.
 - `AbortSignal.any` is used when present; a controller-based fallback covers runtimes without it.
 - A 1.x `config` still mounts: `retryAllCodes` is ignored and `terminalCodes` is read as `excludeCodes`, each with a one-line warning naming the replacement.
 - The Web panel additionally needs `configEditor` and the `settings.section` slot. Without them the policy still applies; the page is simply absent or read-only.
+
+## Changelog
+
+### 2.5.0
+
+- The ladder's last row printed the plugin's **first** delay beside a label that
+  named the ceiling, so it read "every delay capped at 1.0 min — 1.0 s". It now
+  shows the ceiling itself.
+- "Sessions retrying" dropped to zero while a wait was still running when two
+  failures for one session were waiting at once. The count is now per session
+  rather than one flag per session.
+- Install instructions: both surfaces have the plugin manager, so the desktop
+  client installs from **Plugins → Add plugin** like any other. The earlier text
+  sent you through a chat session for no reason.
 
 ## Releasing
 

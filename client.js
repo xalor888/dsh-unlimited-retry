@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
       ladderHint: "Earlier layers get the first word. This plugin only handles what nobody recovered.",
       ladderProvider: "Provider retry policy",
       ladderPlugin: "This plugin",
-      ladderBeyond: "and beyond, every delay capped at {max}",
+      ladderBeyond: "and beyond, every delay capped",
       ladderCap: "up to attempt {n}",
       ladderTerminal: "Terminal",
       ladderTerminalHint: "Excluded codes stop here and fail the turn immediately.",
@@ -146,7 +146,7 @@ window.__ModuleLoader__.load({
       ladderHint: "越靠前的恢复层越先决定，本插件只处理没人接手的失败。",
       ladderProvider: "Provider 重试策略",
       ladderPlugin: "本插件",
-      ladderBeyond: "此后每一次延迟都封顶 {max}",
+      ladderBeyond: "此后每一次延迟均封顶",
       ladderCap: "至第 {n} 次",
       ladderTerminal: "终止",
       ladderTerminalHint: "被排除的错误码直接结束该轮，不再重试。",
@@ -870,7 +870,6 @@ window.__ModuleLoader__.load({
       const stats = data.stats ?? {};
       const config = draft ?? serverConfig ?? {};
       const excluded = Array.isArray(config.excludeCodes) ? config.excludeCodes : [];
-      const providerRung = data.ladder?.[0] ?? null;
       const maxLabel = fmt.duration(config.maxDelayMs);
       const unlimited = config.maxAttempts === null || config.maxAttempts === undefined;
 
@@ -904,10 +903,11 @@ window.__ModuleLoader__.load({
         "data-layer": "plugin",
       }, [
         React.createElement("span", { key: "i", className: "duRungIndex" }, "…"),
-        React.createElement("span", { key: "n", className: "duRungName" },
-          fmt.fill(t("ladderBeyond"), { max: maxLabel })),
-        React.createElement("span", { key: "note", className: "duRungNote" },
-          providerRung === null ? "" : fmt.duration(providerRung.delayMs)),
+        React.createElement("span", { key: "n", className: "duRungName" }, t("ladderBeyond")),
+        // The ceiling this row is about. It used to read `data.ladder[0].delayMs`,
+        // which is the *first* delay of the plugin's own ladder: the row then
+        // said "capped at 1.0 min" on the left and "1.0 s" on the right.
+        React.createElement("span", { key: "note", className: "duRungNote" }, maxLabel),
       ]));
 
       const policyCard = React.createElement("div", { key: "policy", className: "duCard" }, [

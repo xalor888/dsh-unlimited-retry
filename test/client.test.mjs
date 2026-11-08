@@ -514,3 +514,32 @@ test("the toggle has the base style a zero-size button would lack", async () => 
   assert.match(source, /\.duSwitch::after \{[^}]*width: 14px/, "the knob must have a size");
   assert.match(source, /\.duSwitch::after \{[^}]*height: 14px/, "the knob must have a size");
 });
+
+test("the ceiling rung shows the ceiling, not an unrelated delay", async () => {
+  const { exported } = await loadClient();
+  const fake = fakeClientContext();
+  exported.apply(fake.ctx);
+  const [{ options, component }] = fake.registered;
+
+  const snapshot = sampleSnapshot();
+  // A ceiling that cannot be confused with the ladder's first delay.
+  snapshot.config.maxDelayMs = 60_000;
+  snapshot.ladder = [{ attempt: 1, delayMs: 1_000, clamped: false }];
+
+  const html = renderToStaticMarkup(React.createElement(component, {
+    ...options.inject(),
+    t: fake.ctx.locale.bind("unlimitedRetry"),
+    useFeed: () => ({ status: "ready", data: snapshot, error: null, errorCode: null, fetchedAt: Date.now(), consecutiveFailures: 0 }),
+  }));
+
+  // The row used to read "and beyond, every delay capped at 1.0 min" and then
+  // print the ladder's FIRST delay ("1.0 s") in the same row.
+  const row = html.split("and beyond")[1] ?? "";
+  const rowHtml = row.slice(0, row.indexOf("</div></div>"));
+  assert.match(row, /1\.0 min/, "the ceiling itself must appear in the row");
+  assert.doesNotMatch(
+    rowHtml.replace(/1\.0 min/g, ""),
+    /1\.0 s/,
+    "no other delay may appear next to a ceiling label",
+  );
+});

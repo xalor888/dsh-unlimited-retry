@@ -1046,3 +1046,79 @@ test("a disposer-returning registry keeps using the service reader", async () =>
   assert.equal(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), undefined);
   await fake.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// The live counters and the ladder must describe what is actually happening.
+//
+// Both of these were wrong in shipped builds: the session count dropped to zero
+// while a wait was still running, and the ladder row printed a delay that
+// contradicted its own label. Neither is visible from the retry decisions alone,
+// which is why they are asserted from the read model instead.
+// ---------------------------------------------------------------------------
+
+/** Mount with both the read model and projections, and expose the stats reader. */
+function mountingWithStats(config) {
+  const routes = new Map();
+  const fake = fakeContext({
+    services: {
+      webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
+      connection: { requestRejection: () => undefined },
+    },
+  });
+  plugin.apply(fake.ctx, { log: false, ...config });
+  const readStats = () => {
+    const response = captureResponse();
+    routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), response.res);
+    return JSON.parse(response.text()).stats;
+  };
+  return { fake, readStats };
+}
+
+test("a staggered second wait keeps the session counted while it is still waiting", async () => {
+  // Two waits for one session with different delays: when the shorter one
+  // finishes, the session must stay counted because the other is still in flight.
+  const { fake, readStats } = mountingWithStats({ initialDelayMs: 100, maxDelayMs: 900, jitterRatio: 0 });
+
+  const projection = fake.services.get("sessionProjections");
+  const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
+  const agent = fakeAgent("staggered", projection, emit);
+  const fire = () => fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
+
+  const first = fire();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const second = fire();
+  await new Promise((resolve) => setTimeout(resolve, 130));   // the first wait is done
+
+  assert.equal(readStats().activeWaits, 1, "one wait is still in flight");
+  assert.equal(readStats().sessionsRetrying, 1, "and its session must still be counted");
+
+  await Promise.all([first, second]);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(readStats().sessionsRetrying, 0, "and released once every wait ended");
+  await fake.dispose();
+});
+
+test("records stay internally consistent with the counters", async () => {
+  const { fake, readStats } = mountingWithStats({ initialDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 });
+
+  const projection = fake.services.get("sessionProjections");
+  const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
+  const agent = fakeAgent("consistent", projection, emit);
+  const fire = () => fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined);
+
+  const before = readStats();
+  for (let index = 0; index < 3; index += 1) await fire();
+  const after = readStats();
+
+  const delta = after.totalRetries - before.totalRetries;
+  const codeSum = after.byCode.reduce((total, row) => total + row.count, 0)
+    - before.byCode.reduce((total, row) => total + row.count, 0);
+  const providerSum = after.byProvider.reduce((total, row) => total + row.count, 0)
+    - before.byProvider.reduce((total, row) => total + row.count, 0);
+  assert.equal(delta, 3);
+  assert.equal(codeSum, 3, "every retry counted once by code");
+  assert.equal(providerSum, 3, "and once by provider");
+  // Attempts restart per step, so newest-first within one step counts down.
+  assert.deepEqual(after.recent.slice(0, 3).map((row) => row.attempt), [3, 2, 1]);
+  await fake.dispose();
+});

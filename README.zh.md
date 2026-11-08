@@ -24,26 +24,30 @@ DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实
 
 | 你要装在哪 | 安装方式 |
 |---|---|
-| **DSH Web 界面** | 终端：`dsh plugin --profile web add dsh-unlimited-retry` |
-| **官方桌面客户端（Electron）** | **不用终端** —— 在桌面端会话里让 DSH 用内置的 `plugin_manager` 安装（见下） |
+| **DSH Web 界面** | 打开**插件**页面 → 点「**添加插件**」→ 填 `dsh-unlimited-retry`；或在终端执行 `dsh plugin --profile web add dsh-unlimited-retry` |
+| **官方桌面客户端（Electron）** | 打开**插件**页面 → 点「**添加插件**」→ 填 `dsh-unlimited-retry` |
 
-### 官方桌面端：不要用终端命令
+### 从界面安装
 
-桌面端读的是 **`desktop` profile**，而命令行**按设计拒绝**碰它：
+两种界面都自带插件管理器，所以最快的路径是一样的：
+
+1. 在应用里打开**插件**页面。
+2. 点「**添加插件**」。
+3. 填 `dsh-unlimited-retry`（要固定版本就写 `dsh-unlimited-retry@<版本>`）。
+4. 确认；如果设置里没立刻出现这一页，重开应用或刷新页面。
+
+那个输入框接受 npm 包、Git 仓库和本地目录，所以也能填
+`github:xalor888/dsh-unlimited-retry` 或 `link:` 路径。
+
+### 桌面端为什么不能用 `dsh plugin --profile desktop`
+
+桌面端读的是名为 `desktop` 的 profile，它保留给 Electron 应用本身，命令行会**按设计拒绝**：
 
 ```
 error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-所以 `--profile web` 的命令装完，插件落在 `web` profile 里，桌面窗口一个字也读不到 —— 表现就是「设置里根本没有这一页，控制台也不报错」。
-
-**正确做法**：在桌面客户端的会话里直接说：
-
-> 请使用当前宿主内置的 `plugin_manager` 安装 `dsh-unlimited-retry`。先核对当前 profile 和是否已有同名插件；已有安装时先报告来源与版本。完成后告诉我安装结果及是否需要重启。
-
-`plugin_manager` 的作用域就是**当前 profile**（桌面端为 `desktop`），由宿主用它自带的包管理器完成安装与挂载登记 —— 不需要终端、不需要构造 cookie、不需要改写宿主管理的 profile 文件。要固定版本就写 `dsh-unlimited-retry@<版本>`。
-
-首次安装后如果设置里没出现，**完全退出客户端（含系统托盘）再重开**，而不是去堆叠另一份安装。
+而 `--profile web` 的命令会把插件装进 `web` profile，桌面窗口读的是 `desktop`，自然一个字也看不到。上面那条界面路径的作用域正好是「当前应用真正拥有的那个 profile」，这也是它才是正确做法。
 
 > 为什么桌面端也能用：桌面端的 profile 就是 Web 模板（`base` + `web-app`），Electron 加载的是本地 Web UI 的 URL，因此 `dsh.client` 声明的面板在桌面端同样被 `client-modules` 装载。不需要另做一套客户端代码。
 >
@@ -166,7 +170,7 @@ markerFile: null
 dsh plugin --profile web add dsh-unlimited-retry
 ```
 
-官方桌面客户端请在桌面端会话里用内置的 `plugin_manager` 安装 ——
+官方桌面客户端请用应用内的「**插件 → 添加插件**」——
 见 [装在哪里](#装在哪里)。命令行按设计拒绝 `--profile desktop`。
 
 ### 从本仓库
@@ -268,7 +272,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | 依赖 | 要求 |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2 上验证 |
+| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2、0.2.2-rc.1 上验证 |
 | 带 `dsh-agent-loop` 与 `dsh-llm-retry` | 是（重试监听器挂在那条事件上） |
 
 会话投影读取对宿主先后提供过的两种注册形态都做了适配：0.2.2 之前 `register`
@@ -279,6 +283,14 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - 有 `AbortSignal.any` 就用它，没有则用 controller 方案等价实现。
 - 1.x 的 `config` 仍可挂载：`retryAllCodes` 被忽略（除非显式排除，否则每个码都会重试），`terminalCodes` 按 `excludeCodes` 读取，两者各打一条替代提示。
 - Web 面板另需 `configEditor` 与 `settings.section` 槽位；缺这些时策略照常生效，页面只是不存在或只读。
+
+## 更新记录
+
+### 2.5.0
+
+- 重试阶梯最后一行把插件的**首个**延迟印在一个标明上限的标签旁边，读起来是「此后每一次延迟均封顶 1.0 分钟 —— 1.0 秒」。现在显示上限本身。
+- 同一会话有两个失败同时在等待时，较短的那个结束后「正在重试的会话」会掉到 0。改为按会话计数，而不是每会话一个布尔标记。
+- 安装说明：两种界面都自带插件管理器，桌面端就是**插件 → 添加插件**。早先那版让你绕道一个对话会话来装，纯属多余。
 
 ## 发布流程
 

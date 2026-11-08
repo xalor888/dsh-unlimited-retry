@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "2.4.1";
+const PLUGIN_VERSION = "2.5.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -676,8 +676,14 @@ export function apply(ctx, config) {
   const lifetime = new AbortController();
   const active = new Set();
 
-  /** Sessions with a wait in flight right now, for the panel's live count. */
-  const activeSessions = new Set();
+  /**
+   * Session key -> number of waits in flight for that session.
+   *
+   * A count, not a Set: two failures for one session can be waiting at the same
+   * time, and a Set would drop the session as soon as the shorter wait finished,
+   * reporting "0 sessions retrying" while another wait was still running.
+   */
+  const activeSessions = new Map();
   const mountedAt = Date.now();
 
   function log(level, text) {
@@ -859,6 +865,16 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Release one in-flight wait for a session.
+   * @param key - the session key counted by {@link activeSessions}.
+   */
+  function leaveSession(key) {
+    const remaining = (activeSessions.get(key) ?? 1) - 1;
+    if (remaining <= 0) activeSessions.delete(key);
+    else activeSessions.set(key, remaining);
+  }
+
+  /**
    * Read the ladder for one session.
    * @param session - the session that owns the ladder.
    * @returns the attempts already made in this series, and its identity.
@@ -993,7 +1009,7 @@ export function apply(ctx, config) {
     });
 
     const sessionKey = session?.id ?? "unidentified-session";
-    activeSessions.add(sessionKey);
+    activeSessions.set(sessionKey, (activeSessions.get(sessionKey) ?? 0) + 1);
     const at = new Date().toISOString();
     stats.totalRetries += 1;
     stats.lastRetryAt = at;
@@ -1013,7 +1029,7 @@ export function apply(ctx, config) {
     );
 
     const completed = await cancellableDelay(delayMs, [fused.signal]);
-    activeSessions.delete(sessionKey);
+    leaveSession(sessionKey);
     fused.release();
     if (!completed || fused.signal.aborted) return false;
 
