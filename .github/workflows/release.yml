@@ -59,12 +59,12 @@ jobs:
 
       - name: Build the tarball
         id: pack
+        # `npm pack --silent` prints only the filename; see ci.yml for why the
+        # --json output is no longer parsed with `node -e`.
         run: |
-          npm pack --json > pack.json
-          node -e "
-            const [e] = require('./pack.json');
-            console.log('filename=' + e.filename);
-          " >> "$GITHUB_OUTPUT"
+          FILENAME="$(npm pack --silent)"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "packed $FILENAME"
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry-run

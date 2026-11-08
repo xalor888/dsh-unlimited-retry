@@ -66,14 +66,13 @@ jobs:
 
       - name: Build the tarball
         id: pack
+        # `npm pack --silent` prints only the filename. Parsing its --json output
+        # through `node -e` broke once Node changed how it evaluates that string,
+        # and a release step should not depend on an interpreter's eval mode.
         run: |
-          npm pack --json > pack.json
-          node -e "
-            const [entry] = require('./pack.json');
-            console.log('filename=' + entry.filename);
-            console.log('files=' + entry.files.length);
-            console.log('size=' + entry.size);
-          " | tee -a "$GITHUB_OUTPUT"
+          FILENAME="$(npm pack --silent)"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "packed $FILENAME"
 
       - name: Assert the payload a user receives
         run: |
