@@ -366,6 +366,12 @@ every `-rc` build.
 
 ## Changelog
 
+### 2.5.1
+
+- Infrastructure release. The release workflow now publishes through npm **trusted
+  publishing** (GitHub OIDC) instead of a static token, so there is no credential to
+  store, rotate, or lose, and the long-lived bypass-2FA token is gone.
+
 ### 2.5.0
 
 - The ladder's last row printed the plugin's **first** delay beside a label that
@@ -380,7 +386,10 @@ every `-rc` build.
 
 ## Releasing
 
-Publishing is tag-driven; nothing publishes from a branch.
+Publishing is tag-driven; nothing publishes from a branch, and no npm credential
+is stored anywhere. The workflow authenticates with **trusted publishing**: npm
+verifies a short-lived OIDC token that GitHub issues to this job, matched against
+the repository and workflow file registered on the package.
 
 ```bash
 # 1. bump the version in package.json (and PLUGIN_VERSION in index.js)
@@ -389,11 +398,11 @@ npm version patch --no-git-tag-version   # or minor / major
 git tag v2.1.3 && git push origin v2.1.3
 ```
 
-The `Release` workflow then refuses a tag that disagrees with `package.json`
-tests the tree, packs, publishes with npm provenance, creates the GitHub release
-with the tarball attached, and finally re-installs the published version from the
-registry to prove that copy mounts. It needs an `NPM_TOKEN` repository secret and
-an `npm` environment.
+The `Release` workflow then refuses a tag that disagrees with `package.json`, tests
+the tree, packs, publishes with npm provenance, creates the GitHub release with the
+tarball attached, and finally re-installs the published version from the registry
+to prove that copy mounts. It needs no secret: only `id-token: write`, which the
+workflow already declares.
 
 `CI` runs the suite on Node 20, 22 and 24, then packs the tarball, asserts the
 published file set has not drifted, installs it into a clean project, and mounts

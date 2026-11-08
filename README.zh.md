@@ -286,6 +286,11 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 
 ## 更新记录
 
+### 2.5.1
+
+- 基础设施版本。发布流程改用 npm 的 **trusted publishing**（GitHub OIDC），不再依赖静态 token ——
+  没有凭证需要保存、轮换或续期，那个绕过 2FA 的长效 token 已经移除。
+
 ### 2.5.0
 
 - 重试阶梯最后一行把插件的**首个**延迟印在一个标明上限的标签旁边，读起来是「此后每一次延迟均封顶 1.0 分钟 —— 1.0 秒」。现在显示上限本身。
@@ -294,7 +299,9 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 
 ## 发布流程
 
-发布由 tag 驱动，任何分支都不会触发发布。
+发布由 tag 驱动，任何分支都不会触发发布，且**不保存任何 npm 凭证**。工作流使用
+**trusted publishing**：npm 校验 GitHub 为本任务签发的短期 OIDC token，并与登记在包上的
+仓库与工作流文件比对。
 
 ```bash
 # 1. 改 package.json 的版本号（以及 index.js 里的 PLUGIN_VERSION）
@@ -305,8 +312,8 @@ git tag v2.1.3 && git push origin v2.1.3
 
 `Release` 工作流会：拒绝与 `package.json` 不一致的 tag → 跑测试 → 打包 →
 带 npm provenance 发布 → 创建 GitHub Release 并附上 tarball → 最后从 registry
-重新安装已发布版本，证明那一份也能正常挂载。它需要仓库 secret `NPM_TOKEN`
-和一个名为 `npm` 的 environment。
+重新安装已发布版本，证明那一份也能正常挂载。它**不需要任何 secret**，只要
+`id-token: write`，工作流里已声明。
 
 `CI` 在 Node 20 / 22 / 24 上跑测试套件，然后打包、断言发布文件清单没有漂移、
 装进一个干净工程，并挂载安装后的宿主端——包括「取消永不重试」这条规则。
