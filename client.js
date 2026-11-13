@@ -78,9 +78,17 @@ window.__ModuleLoader__.load({
       withoutPolicyHint: "Also retry when the serving adapter published no retryPolicy.",
       recordEvents: "Record session events",
       recordEventsHint: "Append llm/retry and llm/retry-started so the chat surface shows the chain.",
-      excludeTitle: "Terminal codes",
+      scopeTitle: "What gets retried",
+      scopeHint: "Only codes in this list are retried. Anything else — including a code no adapter classified — is left to the loop, because an unrecognised failure is not evidence that a retry helps.",
+      retryAll: "Retry every code",
+      retryAllHint: "Retry anything that is not a cancellation or an exclusion, including unclassified adapter codes.",
+      retryAllNote: "Every code is eligible. A code nobody classified can then retry until the turn ceiling.",
+      retryNone: "Nothing is retried: every failure is left to the loop.",
+      turnCap: "Retries per turn",
+      turnCapHint: "Hard stop across all steps of one turn. The step ladder restarts each step, so this is what stops a fault that survives every step.",
+      excludeTitle: "Always terminal",
       excludeHint: "Failures with these codes are left to the loop instead of retried.",
-      excludeEmpty: "No code is terminal: every failure retries.",
+      excludeEmpty: "No extra exclusions: the retry set alone decides what is retried.",
       excludeAdd: "Add a code",
       excludePlaceholder: "e.g. INVALID_REQUEST",
       excludeRemove: "Remove {code}",
@@ -165,7 +173,15 @@ window.__ModuleLoader__.load({
       withoutPolicyHint: "当 provider 适配器没有发布 retryPolicy 时同样重试。",
       recordEvents: "写入会话事件",
       recordEventsHint: "追加 llm/retry 与 llm/retry-started，聊天界面才会显示重试链路。",
-      excludeTitle: "终止错误码",
+      scopeTitle: "哪些错误会被重试",
+      scopeHint: "只有在列表里的错误码会重试。其他一律交回上层——包括适配器没能归类的错误码：一个无法识别的失败，并不能作为「重试会有用」的依据。",
+      retryAll: "重试所有错误码",
+      retryAllHint: "除取消和终止码之外全部重试，包括适配器未能归类的码。",
+      retryAllNote: "所有错误码都可重试。未能归类的码会一直重试到本轮上限。",
+      retryNone: "不重试任何错误码：所有失败都交回上层。",
+      turnCap: "每轮重试上限",
+      turnCapHint: "同一轮内所有步骤合计的硬上限。阶梯每步都会重置，所以这才是挡住「跨步骤持续失败」的那道闸。",
+      excludeTitle: "始终终止",
       excludeHint: "命中这些错误码的失败交回上层，不再重试。",
       excludeEmpty: "没有终止错误码：所有失败都会重试。",
       excludeAdd: "添加错误码",
@@ -650,6 +666,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState(null);
       const [codeInput, setCodeInput] = React.useState("");
       const [codeError, setCodeError] = React.useState(null);
+      const [retryInput, setRetryInput] = React.useState("");
+      const [retryError, setRetryError] = React.useState(null);
       const [pending, setPending] = React.useState(false);
       const [outcome, setOutcome] = React.useState(null);
       const [confirmReset, setConfirmReset] = React.useState(false);
@@ -699,6 +717,9 @@ window.__ModuleLoader__.load({
           maxDelayMs: draft.maxDelayMs,
           jitterRatio: draft.jitterRatio,
           retryWithoutProviderPolicy: draft.retryWithoutProviderPolicy,
+          retryCodes: draft.retryCodes,
+          retryAllCodes: draft.retryAllCodes,
+          maxRetriesPerTurn: draft.maxRetriesPerTurn,
           excludeCodes: draft.excludeCodes,
           recordSessionEvents: draft.recordSessionEvents,
         };
@@ -757,6 +778,21 @@ window.__ModuleLoader__.load({
         setCodeInput("");
         patch({ excludeCodes: [...(draft?.excludeCodes ?? []), code] });
       }, [codeInput, draft, fmt, patch, t]);
+
+      const addRetryCode = React.useCallback(() => {
+        const code = retryInput.trim().toUpperCase();
+        if (code.length === 0) {
+          setRetryError(t("excludeUnknown"));
+          return;
+        }
+        if (Array.isArray(draft?.retryCodes) && draft.retryCodes.includes(code)) {
+          setRetryError(fmt.fill(t("excludeDuplicate"), { code }));
+          return;
+        }
+        setRetryError(null);
+        setRetryInput("");
+        patch({ retryCodes: [...(draft?.retryCodes ?? []), code] });
+      }, [draft, fmt, patch, retryInput, t]);
 
       const styleTag = React.createElement("style", { key: "css", children: CSS });
 
@@ -909,6 +945,124 @@ window.__ModuleLoader__.load({
         // said "capped at 1.0 min" on the left and "1.0 s" on the right.
         React.createElement("span", { key: "note", className: "duRungNote" }, maxLabel),
       ]));
+
+      // What this layer will and will not retry. 2.x retried every code except a
+      // cancellation, which is how an unclassified adapter code kept a turn alive.
+      const retrySet = Array.isArray(config.retryCodes) ? config.retryCodes : [];
+      const retryingEverything = config.retryAllCodes === true;
+      const scopeCard = React.createElement("div", { key: "scope", className: "duCard" }, [
+        React.createElement("div", { key: "h", className: "duCardHead" }, [
+          React.createElement("div", { key: "t", className: "duCardTitle" }, t("scopeTitle")),
+        ]),
+        React.createElement("div", { key: "hint", className: "duCardHint" }, t("scopeHint")),
+        React.createElement("div", { key: "b", className: "duCardBody" }, [
+          React.createElement(Field, {
+            key: "all",
+            id: "du-retry-all",
+            label: t("retryAll"),
+            hint: t("retryAllHint"),
+          }, React.createElement(Switch, {
+            id: "du-retry-all",
+            checked: retryingEverything,
+            disabled: !writable || pending || config.autoRetry !== true,
+            onChange: (next) => patch({ retryAllCodes: next }),
+            labelId: "du-retry-all-label",
+            describedById: "du-retry-all-hint",
+          })),
+
+          retryingEverything
+            ? React.createElement("div", { key: "allnote", className: "duFieldHint" }, t("retryAllNote"))
+            : React.createElement("div", { key: "chips", className: "duChips" }, retrySet.length === 0
+                ? React.createElement("div", { className: "duEmptyLine" }, t("retryNone"))
+                : retrySet.map((code) => React.createElement("span", {
+                    key: code,
+                    className: "duChip",
+                    "data-mono": "true",
+                  }, [
+                    React.createElement("span", { key: "c" }, code),
+                    React.createElement("button", {
+                      key: "x",
+                      type: "button",
+                      className: "duChipX",
+                      disabled: !writable || pending || config.autoRetry !== true,
+                      "aria-label": fmt.fill(t("excludeRemove"), { code }),
+                      title: fmt.fill(t("excludeRemove"), { code }),
+                      onClick: () => patch({ retryCodes: retrySet.filter((entry) => entry !== code) }),
+                    }, "×"),
+                  ]))),
+
+          React.createElement("div", {
+            key: "add",
+            style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 },
+          }, [
+            React.createElement("input", {
+              key: "i",
+              id: "du-retry-input",
+              className: "duInput",
+              type: "text",
+              autoComplete: "off",
+              spellCheck: false,
+              disabled: !writable || pending || config.autoRetry !== true || retryingEverything,
+              value: retryInput,
+              placeholder: t("excludePlaceholder"),
+              list: "du-code-options-scope",
+              "aria-label": t("retryCodes"),
+              onChange: (event) => {
+                setRetryInput(event.target.value);
+                setRetryError(null);
+              },
+              onKeyDown: (event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addRetryCode();
+                }
+              },
+            }),
+            React.createElement("datalist", { key: "codes", id: "du-code-options-scope" },
+              (data.knownFailureCodes ?? []).concat(data.harnessRetryableCodes ?? []).map((code) =>
+                React.createElement("option", { key: code, value: code }))),
+            React.createElement("button", {
+              key: "b",
+              type: "button",
+              className: "duBtn",
+              disabled: !writable || pending || config.autoRetry !== true || retryingEverything,
+              onClick: addRetryCode,
+            }, t("excludeAddAction")),
+          ]),
+          retryError === null
+            ? null
+            : React.createElement("div", { key: "e", className: "duFieldHint", "data-tone": "error", role: "alert" }, retryError),
+
+          React.createElement(Field, {
+            key: "turncap",
+            id: "du-turn-cap",
+            label: t("turnCap"),
+            hint: t("turnCapHint"),
+          }, [
+            React.createElement("input", {
+              key: "i",
+              id: "du-turn-cap",
+              className: "duInput",
+              type: "number",
+              min: 1,
+              step: 1,
+              inputMode: "numeric",
+              placeholder: t("unlimited"),
+              disabled: !writable || pending || config.autoRetry !== true,
+              value: config.maxRetriesPerTurn === null || config.maxRetriesPerTurn === undefined
+                ? ""
+                : String(config.maxRetriesPerTurn),
+              onChange: (event) => {
+                const raw = event.target.value.trim();
+                const parsed = raw.length === 0 ? null : parseField(raw, 1);
+                if (raw.length === 0 || parsed !== undefined) patch({ maxRetriesPerTurn: parsed });
+              },
+            }),
+            React.createElement("span", { key: "u", className: "duUnit" },
+              config.maxRetriesPerTurn === null || config.maxRetriesPerTurn === undefined ? t("unlimited") : ""),
+          ]),
+        ]),
+      ]);
 
       const policyCard = React.createElement("div", { key: "policy", className: "duCard" }, [
         React.createElement("div", { key: "h", className: "duCardHead" }, [
@@ -1229,6 +1383,7 @@ window.__ModuleLoader__.load({
           ]),
         ]),
 
+        scopeCard,
         policyCard,
 
         React.createElement("div", { key: "dist", className: "duGrid2" }, [

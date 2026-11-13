@@ -6,13 +6,18 @@
 #
 # Defaults are deliberate:
 #   autoRetry: true          — the plugin's entire reason to exist
-#   maxAttempts: null        — no attempt limit
-#   excludeCodes: []         — NO code is terminal, including auth/quota/context
-#   maxDelayMs: 60000        — the only bound on an unbounded budget
+#   retryCodes: the five the Harness itself retries (EMPTY_RESPONSE, RATE_LIMIT,
+#               SERVER, TIMEOUT, TRANSPORT). Anything else is the upstream
+#               layer's judgement that re-sending will not help: a code nobody
+#               classified is how 2.x retried the same dead request forever.
+#   retryAllCodes: false     — set true to retry everything except exclusions
+#   maxAttempts: null        — no per-step attempt limit
+#   maxRetriesPerTurn: 40    — hard stop, so a fault that survives every step
+#                              cannot keep a turn alive indefinitely
+#   maxDelayMs: 60000        — ceiling for any single wait
 #
-# If you want a bounded budget, either set maxAttempts, or list the permanent
-# failure codes in excludeCodes (the Settings panel has a one-click preset for
-# exactly that set).
+# If you want a wider or narrower policy, change retryCodes (or retryAllCodes),
+# and use excludeCodes for codes that must stay terminal either way.
 
 - insert:
     - id: unlimited-retry
@@ -24,6 +29,14 @@
         maxDelayMs: 60000
         jitterRatio: 0.2
         retryWithoutProviderPolicy: true
+        retryCodes:
+          - EMPTY_RESPONSE
+          - RATE_LIMIT
+          - SERVER
+          - TIMEOUT
+          - TRANSPORT
+        retryAllCodes: false
+        maxRetriesPerTurn: 40
         excludeCodes: []
         recordSessionEvents: true
         log: true

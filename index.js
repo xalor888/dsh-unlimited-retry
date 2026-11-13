@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "2.5.1";
+const PLUGIN_VERSION = "3.0.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -74,6 +74,30 @@ const ALWAYS_TERMINAL_CODES = Object.freeze(["ABORTED"]);
 
 /** Fast membership test for {@link ALWAYS_TERMINAL_CODES}. */
 const ALWAYS_TERMINAL = new Set(ALWAYS_TERMINAL_CODES);
+
+/**
+ * The failure codes a retry can plausibly recover from.
+ *
+ * Copied from the shipped `dsh-llm` layer's own `DEFAULT_RETRYABLE_CODES`. That
+ * list is the Harness's explicit judgement about which failures are worth
+ * re-sending, and a plugin that retries *outside* it is overriding a decision
+ * that upstream made deliberately.
+ *
+ * This is the whole reason 2.x over-retried: it defaulted to "nothing is
+ * terminal", so an adapter code such as `PI_AI_ERROR` — which pi-ai emits for
+ * both unclassified stream errors *and* explicitly non-retryable `pending` /
+ * `deferred` states — was retried with no ceiling until the turn was killed.
+ */
+const HARNESS_RETRYABLE_CODES = Object.freeze([
+  "EMPTY_RESPONSE",
+  "RATE_LIMIT",
+  "SERVER",
+  "TIMEOUT",
+  "TRANSPORT",
+]);
+
+/** Default allow-list; see {@link HARNESS_RETRYABLE_CODES}. */
+const DEFAULT_RETRY_CODES = HARNESS_RETRYABLE_CODES;
 
 /**
  * Every failure code the Harness itself can produce, for the panel's picker.
@@ -138,7 +162,13 @@ const DEFAULTS = Object.freeze({
   jitterRatio: 0.2,
   /** Retry even when the serving adapter published no retryPolicy at all. */
   retryWithoutProviderPolicy: true,
-  /** Codes that stay terminal even though the budget is unbounded. */
+  /** Codes this layer will retry; everything else is left to the loop. */
+  retryCodes: DEFAULT_RETRY_CODES,
+  /** Retry any code that is not always-terminal and not excluded. */
+  retryAllCodes: false,
+  /** Hard ceiling on retries inside one turn, whatever the codes say. */
+  maxRetriesPerTurn: 40,
+  /** Codes that stay terminal even when they are in `retryCodes`. */
   excludeCodes: Object.freeze([]),
   /** Append `llm/retry` + `llm/retry-started` so the chat surface shows the chain. */
   recordSessionEvents: true,
@@ -155,6 +185,9 @@ const KNOWN_KEYS = Object.freeze([
   "maxDelayMs",
   "jitterRatio",
   "retryWithoutProviderPolicy",
+  "retryCodes",
+  "retryAllCodes",
+  "maxRetriesPerTurn",
   "excludeCodes",
   "recordSessionEvents",
   "log",
@@ -196,7 +229,10 @@ async function loadConfigSchema() {
     // `normalize()` instead, which is stricter than a hint either way.
     jitterRatio: schemastery.number().min(0).max(1).default(0.2).description("Randomization applied to each delay, as a fraction of the nominal value."),
     retryWithoutProviderPolicy: schemastery.boolean().default(true).description("Retry even when the serving adapter published no retryPolicy."),
-    excludeCodes: schemastery.array(schemastery.string()).default([]).description("Failure codes that stay terminal."),
+    retryCodes: schemastery.array(schemastery.string()).default([...DEFAULT_RETRY_CODES]).description("Failure codes this plugin retries. Any other code is left to the loop."),
+    retryAllCodes: schemastery.boolean().default(false).description("Retry every code that is not always-terminal and not excluded, including unclassified adapter codes."),
+    maxRetriesPerTurn: nullableCount.default(DEFAULTS.maxRetriesPerTurn).description("Hard ceiling on retries inside one turn. Empty or null means no turn ceiling."),
+    excludeCodes: schemastery.array(schemastery.string()).default([]).description("Failure codes that stay terminal even when listed in retryCodes."),
     recordSessionEvents: schemastery.boolean().default(true).description("Append llm/retry and llm/retry-started session events."),
     log: schemastery.boolean().default(true).description("Write retry decisions to the Harness log."),
     markerFile: nullableString.description("Optional absolute path for a one-line JSON mount probe."),
@@ -277,6 +313,9 @@ const CHAIN_SCHEMA = await (async () => {
   return zod.z.object({
     attempt: zod.z.number().int().nonnegative().default(0),
     retryId: zod.z.string().optional(),
+    turn: zod.z.number().int().nonnegative().optional(),
+    // Retries already spent inside the current turn, across all its steps.
+    turnAttempts: zod.z.number().int().nonnegative().default(0),
   });
 })();
 
@@ -353,12 +392,24 @@ function normalize(raw) {
   // 0 and negatives mean "no cap", matching how an empty panel field is read.
   const maxAttempts = parsedAttempts === null || parsedAttempts < 1 ? null : parsedAttempts;
 
+  // 0 and negatives mean "no ceiling", matching how an empty panel field is read.
+  const rawTurnLimit = source.maxRetriesPerTurn;
+  const parsedTurnLimit = rawTurnLimit === null || rawTurnLimit === undefined
+    ? DEFAULTS.maxRetriesPerTurn
+    : Math.trunc(finite(rawTurnLimit, 0));
+  const maxRetriesPerTurn = parsedTurnLimit < 1 ? null : parsedTurnLimit;
+
   // Canonical on both sides, so `Auth`, `auth` and ` AUTH ` are one exclusion.
   const legacyExcludes = Array.isArray(source.terminalCodes) ? source.terminalCodes : [];
   const excludeCodes = canonicalCodeSet([
     ...legacyExcludes,
     ...(Array.isArray(source.excludeCodes) ? source.excludeCodes : []),
   ]);
+  const retryCodes = canonicalCodeSet(
+    Array.isArray(source.retryCodes) && source.retryCodes.length > 0
+      ? source.retryCodes
+      : DEFAULT_RETRY_CODES,
+  );
 
   const retired = Object.keys(RETIRED_KEYS).filter((key) => Object.hasOwn(source, key));
 
@@ -369,6 +420,9 @@ function normalize(raw) {
     maxDelayMs,
     jitterRatio,
     retryWithoutProviderPolicy: source.retryWithoutProviderPolicy !== false,
+    retryAllCodes: source.retryAllCodes === true,
+    retryCodes,
+    maxRetriesPerTurn,
     excludeCodes,
     recordSessionEvents: source.recordSessionEvents !== false,
     log: source.log !== false,
@@ -390,6 +444,9 @@ function configPayload(cfg) {
     maxDelayMs: cfg.maxDelayMs,
     jitterRatio: cfg.jitterRatio,
     retryWithoutProviderPolicy: cfg.retryWithoutProviderPolicy,
+    retryCodes: [...cfg.retryCodes],
+    retryAllCodes: cfg.retryAllCodes,
+    maxRetriesPerTurn: cfg.maxRetriesPerTurn,
     excludeCodes: [...cfg.excludeCodes],
     recordSessionEvents: cfg.recordSessionEvents,
     log: cfg.log,
@@ -782,8 +839,13 @@ export function apply(ctx, config) {
   /** One retry series; see `CHAIN_SCHEMA` for why it is a real zod schema. */
 
   /** Boundaries that end the request series owning a ladder. */
-  const CHAIN_RESETS = new Set(["step/start", "turn/start", "turn/end", "assistant/message"]);
-  const EMPTY_CHAIN = Object.freeze({ attempt: 0, retryId: undefined });
+  // Boundaries that end the *step* ladder. A turn boundary resets the turn
+  // budget too; a step boundary must not, or the ceiling would be per-step and
+  // a turn could still loop across steps.
+  const STEP_RESETS = new Set(["step/start", "assistant/message"]);
+  const TURN_RESETS = new Set(["turn/start", "turn/end"]);
+  const CHAIN_RESETS = new Set([...STEP_RESETS, ...TURN_RESETS]);
+  const EMPTY_CHAIN = Object.freeze({ attempt: 0, retryId: undefined, turn: undefined, turnAttempts: 0 });
 
   let chainsRegistered = false;
   /**
@@ -796,13 +858,18 @@ export function apply(ctx, config) {
     try {
       const registered = ctx.sessionProjections.register({
         key: CHAIN_KEY,
-        stateVersion: 1,
+        stateVersion: 2,
         stateSchema: CHAIN_SCHEMA,
         init: () => EMPTY_CHAIN,
         apply: (state, event) => {
           const type = event?.type;
           if (typeof type !== "string") return state;
-          if (CHAIN_RESETS.has(type)) return state.attempt === 0 ? state : EMPTY_CHAIN;
+          if (TURN_RESETS.has(type)) {
+            return state.attempt === 0 && (state.turnAttempts ?? 0) === 0 ? state : EMPTY_CHAIN;
+          }
+          if (STEP_RESETS.has(type)) {
+            return state.attempt === 0 ? state : { ...state, attempt: 0 };
+          }
           if (type !== "llm/retry") return state;
           // Only this plugin's own retries own this ladder.
           if (event.data?.policyKey !== POLICY_KEY) return state;
@@ -810,7 +877,14 @@ export function apply(ctx, config) {
           if (attempt === 0) return state;
           const retryId = typeof event.data?.retryId === "string" ? event.data.retryId : state.retryId;
           if (attempt === state.attempt && retryId === state.retryId) return state;
-          return { attempt, retryId };
+          const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : state.turn;
+          const sameTurn = turn !== undefined && turn === state.turn;
+          return {
+            attempt,
+            retryId,
+            turn,
+            turnAttempts: (sameTurn ? (state.turnAttempts ?? 0) : 0) + 1,
+          };
         },
       });
       chainsRegistered = true;
@@ -860,7 +934,13 @@ export function apply(ctx, config) {
       const type = event?.type;
       if (typeof type !== "string" || !CHAIN_RESETS.has(type)) return;
       const id = session?.id ?? "unidentified-session";
-      fallbackChains.delete(id);
+      const current = fallbackChains.get(id);
+      if (current === undefined) return;
+      // A step boundary ends the step ladder but must keep the turn budget; a
+      // turn boundary ends both.
+      fallbackChains.set(id, TURN_RESETS.has(type)
+        ? EMPTY_CHAIN
+        : { ...current, attempt: 0 });
     });
   }
 
@@ -907,9 +987,13 @@ export function apply(ctx, config) {
    * Record that one attempt is being scheduled.
    * @param session - the owning session.
    * @param attempt - the attempt number being scheduled.
+   * @param retryId - the identity shared by the retry's two durable events.
+   * @param turn - the turn this attempt belongs to, for the turn ceiling.
+   * @param session - the owning session.
+   * @param attempt - the attempt number being scheduled.
    * @param retryId - the series identity.
    */
-  function rememberChain(session, attempt, retryId) {
+  function rememberChain(session, attempt, retryId, turn) {
     if (chainsRegistered) {
       // The projection folds the `llm/retry` event appended by `backoff()`;
       // nothing else may write here.
@@ -920,7 +1004,14 @@ export function apply(ctx, config) {
       const oldest = fallbackChains.keys().next().value;
       if (oldest !== undefined) fallbackChains.delete(oldest);
     }
-    fallbackChains.set(id, { attempt, retryId });
+    const previous = fallbackChains.get(id);
+    const sameTurn = previous?.turn !== undefined && previous.turn === turn;
+    fallbackChains.set(id, {
+      attempt,
+      retryId,
+      turn,
+      turnAttempts: (sameTurn ? previous.turnAttempts ?? 0 : 0) + 1,
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -960,6 +1051,9 @@ export function apply(ctx, config) {
       // asking an operator to spell a constant from memory. Providers still
       // surface their own codes, which is why the input stays free text too.
       knownFailureCodes: [...KNOWN_FAILURE_CODES],
+      // The codes the Harness itself declares retryable: the panel shows these as
+      // the default scope and offers them in the picker.
+      harnessRetryableCodes: [...DEFAULT_RETRY_CODES],
       // Rules that apply regardless of configuration, published so the panel can
       // explain them rather than looking like it silently ignored a setting.
       alwaysTerminalCodes: [...ALWAYS_TERMINAL_CODES],
@@ -1080,6 +1174,20 @@ export function apply(ctx, config) {
       return downstream;
     }
 
+    // Retry scope. A code outside the allow-list is the Harness's own signal that
+    // re-sending will not help, or an adapter code nobody classified — and an
+    // unclassified code is exactly what produced the endless turns under 2.x,
+    // where everything except a cancellation was retried.
+    if (!cfg.retryAllCodes && !cfg.retryCodes.has(code)) {
+      bump(stats.terminalSeen, code);
+      log(
+        "info",
+        `failure "${code}" is outside the retry set; left to the loop `
+          + `(retryCodes: ${[...cfg.retryCodes].join(", ") || "none"})`,
+      );
+      return downstream;
+    }
+
     // The ladder is keyed by the session, never by the agent object: the session
     // is created before the agent that owns it, and the agent itself carries no
     // `id`. `chainFor` falls back to a single shared key when a session is
@@ -1093,6 +1201,22 @@ export function apply(ctx, config) {
       return downstream;
     }
 
+    // Turn ceiling. The step ladder resets every step, so a fault that survives
+    // each step would otherwise restart at attempt 1 forever and the turn would
+    // never end. This is the backstop that makes that impossible even for a code
+    // the allow-list accepts.
+    if (cfg.maxRetriesPerTurn !== null) {
+      const spentThisTurn = chain.turn !== undefined && chain.turn === turn ? chain.turnAttempts ?? 0 : 0;
+      if (spentThisTurn >= cfg.maxRetriesPerTurn) {
+        bump(stats.terminalSeen, code);
+        log(
+          "warn",
+          `turn retry ceiling ${cfg.maxRetriesPerTurn} reached for "${code}"; left to the loop`,
+        );
+        return downstream;
+      }
+    }
+
     // One identity per retry series, so the two durable events pair up.
     const retryId = chain.retryId ?? newRetryId();
 
@@ -1104,7 +1228,7 @@ export function apply(ctx, config) {
 
     // Record before waiting: a wait that is cancelled must still be visible, and
     // when the ladder is projection-folded this append IS the state update.
-    rememberChain(session, attempt, retryId);
+    rememberChain(session, attempt, retryId, turn);
     if (!(await backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal))) {
       return downstream;
     }

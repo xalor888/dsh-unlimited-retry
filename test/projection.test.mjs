@@ -23,13 +23,22 @@ import assert from "node:assert/strict";
 // An explicit DSH_INSTALL_DIR is authoritative: it either works or the suite
 // skips, so CI can assert the integration path is really exercised.
 const EXPLICIT = process.env.DSH_INSTALL_DIR;
+// DSH_INSTALL_DIR is set by the Harness when it spawns a shell, and it may point
+// either at the dsh package or at its node_modules. Accept both, or the
+// integration tests silently skip in exactly the environment they exist to test.
+const candidatesFor = (root) => [
+  root,
+  `${root}/node_modules`,
+  `${root}/node_modules/@deepseek-ai`,
+];
 const CANDIDATES = EXPLICIT === undefined
   ? [
       `${process.env.HOME ?? ""}/.local/lib/node_modules/@deepseek-ai/dsh/node_modules`,
+      `${process.env.HOME ?? ""}/.local/lib/node_modules/@deepseek-ai/dsh`,
       "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules",
       "/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules",
     ]
-  : [EXPLICIT];
+  : candidatesFor(EXPLICIT);
 
 const { existsSync } = await import("node:fs");
 const HARNESS = CANDIDATES.find(
@@ -94,7 +103,7 @@ async function projectionRoot() {
 }
 
 /** Fire one request failure through the real dispatcher. */
-function fire(app, session, failure = { message: "x", code: "NETWORK" }) {
+function fire(app, session, failure = { message: "x", code: "TRANSPORT" }) {
   return app.waterfall(
     "agent/request-error",
     { agent: { session }, turn: 1, step: 1, provider: "provider", failure, signal: new AbortController().signal },
@@ -170,7 +179,7 @@ it("cancelling the turn during the wait stops the retry", async () => {
       turn: 1,
       step: 1,
       provider: "provider",
-      failure: { message: "x", code: "NETWORK" },
+      failure: { message: "x", code: "TRANSPORT" },
       signal: controller.signal,
     },
     async () => undefined,

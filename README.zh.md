@@ -90,7 +90,7 @@ DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的
 
 ### 重试行为
 
-- 🔁 **真正无限**：默认不设次数上限，一直重试到成功或你叫停
+- 🔁 **在诚实的地方才无限**：对「有可能恢复」的错误码不设每步次数上限，但每轮有一道硬上限，永久故障无法把一轮拖住
 - ⏱️ **指数退避 + 抖动**：`initialDelayMs` 起算，每次翻倍，封顶 `maxDelayMs`，每轮叠加随机抖动避免同步风暴
 - 🚧 **上限是硬约束**：`maxDelayMs` 是天花板，**任何配置冲突都以它为准**。设了 10ms 就是 10ms，不会因为 `initialDelayMs` 更大而被悄悄抬高
 - 🛑 **取消永不重试**：`ABORTED` 在任何配置下都终止（见下）
@@ -140,18 +140,34 @@ initialDelayMs: 1000
 maxDelayMs: 60000
 jitterRatio: 0.2
 retryWithoutProviderPolicy: true
-excludeCodes: []         # 没有配置层面的终止码（ABORTED 始终终止）
+retryCodes:              # Harness 自己认定可重试的那一组
+  - EMPTY_RESPONSE
+  - RATE_LIMIT
+  - SERVER
+  - TIMEOUT
+  - TRANSPORT
+retryAllCodes: false     # true = 除终止码外全部重试
+maxRetriesPerTurn: 40    # 一轮内所有步骤合计的硬上限
+excludeCodes: []
 recordSessionEvents: true
 log: true
 markerFile: null
 ```
 
-**默认没有任何「配置层面」的终止错误码——包括认证、配额、计费、上下文溢出。** 这就是这里「无限」的含义，并且挂载时会明确提示一次，让它是一个可见的决定，而不是一次无声的花费。唯一的约束是 `maxDelayMs`：一个永久失败的请求大约每分钟重试一次，一直持续下去。
+**默认只重试 Harness 自己认定的可重试错误码。** 这份列表直接取自 `dsh-llm` 的 `DEFAULT_RETRYABLE_CODES`，不是这里自己编的：它来自真正知道每种失败含义的那一层。其余一律立刻交回上层——认证、配额、计费、上下文溢出，以及**任何适配器没能归类的错误码**。
 
-两种收口方式：
+2.x 的默认正好相反，而且错得很具体、代价很高：适配器在无法归类流错误时会报一个不透明的码（`dsh-llm-pi-ai` 叫它 `PI_AI_ERROR`），而这个码同时覆盖它明确标记为不可重试的状态；于是 2.x 拿着一个永久故障、没有上限地重试，整轮永远结束不了。**一个没人认出来的错误码，不能当作「重试会有用」的依据。**
+
+另外两道闸：
+
+1. **`maxRetriesPerTurn`**（默认 40）是同一轮内所有步骤合计的硬上限。阶梯每步都会重置，没有它，一个跨步骤持续存在的故障会每步重新从第 1 次开始，无穷无尽。
+2. **`maxAttempts`** 照旧限制每个 step。
+
+调整范围的方式：
 
 1. **设置 `maxAttempts`** 为正整数 —— 本插件在每个 step 重试这么多次后交回上层，效果等同于没装。
-2. **把终止错误码写进 `excludeCodes`。** 面板里有一键*使用推荐集合*，这些码的共同点是「重发一次仍然同样失败」：
+2. **放宽范围**：`retryAllCodes: true`，或把某个具体码加进 `retryCodes`；再用 `excludeCodes` 收窄，它永远优先。
+3. **把错误码写进 `excludeCodes`。** 面板里有一键*使用推荐集合*，这些码的共同点是「重发一次仍然同样失败」：
 
    `AUTH`、`UNAUTHORIZED`、`FORBIDDEN`、`BILLING`、`QUOTA`、`ACCOUNT_QUOTA`、
    `MISSING_CREDENTIAL`、`INVALID_CREDENTIAL`、`MODEL_NOT_FOUND`、`NO_ADAPTER`、
@@ -234,7 +250,10 @@ dsh-unlimited-retry/
 | `maxDelayMs` | number | `60000` | **单次延迟天花板，冲突时以它为准** |
 | `jitterRatio` | number | `0.2` | 每轮延迟的随机浮动比例（0–1） |
 | `retryWithoutProviderPolicy` | boolean | `true` | 适配器没发布 `retryPolicy` 时也重试 |
-| `excludeCodes` | string[] | `[]` | 终止错误码（大小写/空白不敏感） |
+| `retryCodes` | string[] | Harness 那 5 个可重试码 | 本插件会重试的错误码；其他一律交回上层 |
+| `retryAllCodes` | boolean | `false` | 除取消与终止码之外全部重试 |
+| `maxRetriesPerTurn` | number \| null | `40` | 同一轮内所有步骤合计的硬上限；`null` = 本轮不限 |
+| `excludeCodes` | string[] | `[]` | 始终终止的错误码（大小写/空白不敏感），优先于 `retryCodes` |
 | `recordSessionEvents` | boolean | `true` | 是否写入 `llm/retry` / `llm/retry-started` |
 | `log` | boolean | `true` | 是否把重试决定写进 DSH 日志 |
 | `markerFile` | string \| null | `null` | 可选：挂载探针文件路径（诊断用） |
@@ -272,7 +291,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | 依赖 | 要求 |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2、0.2.2-rc.1 上验证 |
+| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2、0.2.2-rc.1、0.2.2-rc.3 上验证 |
 | 带 `dsh-agent-loop` 与 `dsh-llm-retry` | 是（重试监听器挂在那条事件上） |
 
 会话投影读取对宿主先后提供过的两种注册形态都做了适配：0.2.2 之前 `register`
@@ -283,6 +302,31 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - 有 `AbortSignal.any` 就用它，没有则用 controller 方案等价实现。
 - 1.x 的 `config` 仍可挂载：`retryAllCodes` 被忽略（除非显式排除，否则每个码都会重试），`terminalCodes` 按 `excludeCodes` 读取，两者各打一条替代提示。
 - Web 面板另需 `configEditor` 与 `settings.section` 槽位；缺这些时策略照常生效，页面只是不存在或只读。
+
+## 本插件不碰的东西：工具调用与 MCP 调用
+
+这里的重试**只重发模型请求**，从不重跑工具。
+
+这是结构决定的，不是承诺：`agent/request-error` 在 `dsh-agent-loop` 里只有一处触发点 —— 助手**流**以 `kind === "error"` 或 `"aborted"` 结束时 —— 而循环里的工具执行发生在消息产出之后。工具抛错不会变成 `request-error`，它会变成 `tool/result` 的失败，并由循环抛出。
+
+这一点是对真实会话验证的，不是靠读代码推断：本机会话库里 41 条重试记录，**41 条前一条事件都是 `assistant/attempt`**（失败的流结算），没有一条前面是 `tool/result`。
+
+所以，如果某一轮看起来在反复调用同一个工具，那个循环属于模型或工具，不属于本插件：
+
+- **模型**一直挑那个失败的工具 —— 这是 `dsh-repeat-tool-reminder` 负责的事；
+- **MCP 服务**返回错误，在修好之前会一直返回错误；
+- 本插件只决定要不要重发**请求**，而且从 3.0.0 起只对那些「有可能恢复」的错误码这么做。
+
+### 3.0.0
+
+**破坏性变更：重试范围反过来了。** 2.x 除取消之外「什么都重试」。实际后果是：适配器无法归类流错误时给出的 `PI_AI_ERROR`（这个码同时覆盖它明确标记为不可重试的状态）被无上限地重试，于是一个跨步骤持续存在的故障让整轮永远结束不了。真实会话记录里可以看到阶梯一步一步往前走，而同一条 `tier_limit_exceeded` 一直在。
+
+- 默认改成 Harness 自己认定的可重试集合（`EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`）。其他一律交回上层——包括未能归类的错误码。
+- `retryCodes` 与 `retryAllCodes` 把范围变成显式且可逆的设置；`excludeCodes` 始终优先。
+- `maxRetriesPerTurn`（默认 40）挡住「每个步骤都重来一遍」的持续故障——只靠按步阶梯永远挡不住。
+- 工具调用与 MCP 调用从来就不在本插件的重试范围内——见上一节，依据是 41 条重试记录里没有一条前面是 `tool/result`。
+
+如果你确实依赖 2.x 的行为，设 `retryAllCodes: true`。面板的「哪些错误会被重试」卡片把它做成了一个开关，不需要改配置文件。
 
 ## 更新记录
 

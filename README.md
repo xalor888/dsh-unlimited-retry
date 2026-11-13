@@ -117,7 +117,7 @@ the shipped contracts, not assumed:
 
 ### Retry behaviour
 
-- 🔁 **Genuinely unbounded**: no attempt limit by default; it retries until success or until you stop it
+- 🔁 **Unbounded where that is honest**: no per-step attempt limit for codes that can recover, and a hard per-turn ceiling so a permanent fault cannot hold a turn open
 - ⏱️ **Exponential backoff with jitter**: starts at `initialDelayMs`, doubles, capped at `maxDelayMs`, with per-delay randomization so synchronized storms cannot form
 - 🚧 **The ceiling is a hard constraint**: `maxDelayMs` wins any conflict. Ask for 10 ms and you get 10 ms — it is never silently raised because `initialDelayMs` was larger
 - 🛑 **A cancellation is never retried**: `ABORTED` is terminal at any configuration (see below)
@@ -172,30 +172,53 @@ silently ignored.
 
 ```yaml
 autoRetry: true
-maxAttempts: null        # no attempt limit
+maxAttempts: null        # no per-step attempt limit
 initialDelayMs: 1000
 maxDelayMs: 60000
 jitterRatio: 0.2
 retryWithoutProviderPolicy: true
-excludeCodes: []         # no configured code is terminal (ABORTED always is)
+retryCodes:              # the set the Harness itself retries
+  - EMPTY_RESPONSE
+  - RATE_LIMIT
+  - SERVER
+  - TIMEOUT
+  - TRANSPORT
+retryAllCodes: false     # true = retry everything that is not excluded
+maxRetriesPerTurn: 40    # hard stop across all steps of one turn
+excludeCodes: []
 recordSessionEvents: true
 log: true
 markerFile: null
 ```
 
-**No configured failure code is terminal by default — including auth, quota,
-billing, and context-overflow codes.** That is what *unlimited* means here, and
-it is announced once at mount so it is a visible decision rather than a silent
-spend. The only bound is `maxDelayMs`, so a permanently failing request costs
-roughly one request per minute, forever.
+**Only the codes the Harness itself declares retryable are retried.** That list is
+copied from `dsh-llm`'s own `DEFAULT_RETRYABLE_CODES` rather than invented here:
+it is the judgement of the layer that knows what each failure means. Everything
+else — auth, quota, billing, context overflow, and **any code no adapter
+classified** — is handed straight back to the loop.
 
-Two ways to bound it:
+Version 2.x defaulted to the opposite, and it was wrong in a specific and
+expensive way: an adapter that cannot classify a stream error reports an opaque
+code (`dsh-llm-pi-ai` calls it `PI_AI_ERROR`) that also covers its explicitly
+non-retryable states, so 2.x retried a permanent fault with no ceiling while the
+turn never ended. A code nobody recognised is not evidence that a retry helps.
+
+Two more bounds:
+
+1. **`maxRetriesPerTurn`** (default 40) is a hard stop across all steps of a turn.
+   The step ladder restarts every step, so without it a fault that survives each
+   step would begin again at attempt 1 forever.
+2. **`maxAttempts`** caps per step, exactly as before.
+
+Ways to adjust the scope:
 
 1. **Set `maxAttempts`** to a positive integer — this plugin then stops after
    that many tries per step and delegates, exactly as if it were not installed.
-2. **List terminal codes in `excludeCodes`.** The panel has a one-click
-   *Use recommended set* action for the codes where a retry re-sends a request
-   that fails identically:
+2. **Widen the scope** with `retryAllCodes: true`, or add a specific code to
+   `retryCodes`. Then narrow it with `excludeCodes`, which always wins.
+3. **List codes in `excludeCodes`.** The panel has a one-click *Use recommended
+   set* action for the codes where a retry re-sends a request that fails
+   identically:
 
    `AUTH`, `UNAUTHORIZED`, `FORBIDDEN`, `BILLING`, `QUOTA`, `ACCOUNT_QUOTA`,
    `MISSING_CREDENTIAL`, `INVALID_CREDENTIAL`, `MODEL_NOT_FOUND`, `NO_ADAPTER`,
@@ -293,7 +316,10 @@ The plugin also exports a `Config` schema, so its fields appear in
 | `maxDelayMs` | number | `60000` | **Single-delay ceiling; wins any conflict** |
 | `jitterRatio` | number | `0.2` | Randomization per delay (0–1) |
 | `retryWithoutProviderPolicy` | boolean | `true` | Also retry when the adapter published no policy |
-| `excludeCodes` | string[] | `[]` | Terminal codes (case/whitespace-insensitive) |
+| `retryCodes` | string[] | the five retryable Harness codes | Codes this plugin retries; anything else is left to the loop |
+| `retryAllCodes` | boolean | `false` | Retry every code that is not a cancellation or an exclusion |
+| `maxRetriesPerTurn` | number \| null | `40` | Hard stop across all steps of one turn; `null` = no turn ceiling |
+| `excludeCodes` | string[] | `[]` | Always-terminal codes (case/whitespace-insensitive); wins over `retryCodes` |
 | `recordSessionEvents` | boolean | `true` | Append `llm/retry` / `llm/retry-started` |
 | `log` | boolean | `true` | Write retry decisions to the DSH log |
 | `markerFile` | string \| null | `null` | Optional mount-probe path (diagnostics) |
@@ -347,7 +373,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | Requirement | Value |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5, 0.2.2-alpha.2 and 0.2.2-rc.1 |
+| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5, 0.2.2-alpha.2, 0.2.2-rc.1 and 0.2.2-rc.3 |
 | Ships `dsh-agent-loop` and `dsh-llm-retry` | Yes — the retry listener hangs off that event |
 
 The session-projection reader adapts to both registration shapes the Host has
@@ -363,6 +389,51 @@ every `-rc` build.
 - `AbortSignal.any` is used when present; a controller-based fallback covers runtimes without it.
 - A 1.x `config` still mounts: `retryAllCodes` is ignored and `terminalCodes` is read as `excludeCodes`, each with a one-line warning naming the replacement.
 - The Web panel additionally needs `configEditor` and the `settings.section` slot. Without them the policy still applies; the page is simply absent or read-only.
+
+## What this plugin does not touch: tool calls and MCP calls
+
+A retry here **re-issues the model request only.** It never re-runs a tool.
+
+That is structural, not a promise: `agent/request-error` is emitted by
+`dsh-agent-loop` at exactly one place — when the assistant **stream** finished
+with `kind === "error"` or `"aborted"` — and the loop's tool execution happens
+after a message has been produced. A tool that throws never becomes a
+`request-error`; it becomes a `tool/result` error and is thrown by the loop.
+
+Verified against real transcripts rather than by reading code: across 41 recorded
+retries in the local session store, **41 were preceded by `assistant/attempt`** —
+the failed stream settlement — and none by `tool/result`.
+
+So if a turn appears to loop while calling the same tool, the loop belongs to the
+model or to the tool, not to this plugin:
+
+- a **model** that keeps choosing a failing tool is what `dsh-repeat-tool-reminder`
+  exists for;
+- an **MCP server** that returns errors will keep returning them until it is fixed;
+- this plugin only decides whether to re-send the *request*, and since 3.0.0 it only
+  does so for codes that can plausibly recover.
+
+### 3.0.0
+
+**Breaking: the retry scope was inverted.** 2.x retried *every* code except a
+cancellation. In practice that meant an adapter that could not classify a stream
+error (`PI_AI_ERROR`) — which also covers its explicitly non-retryable states —
+was retried with no ceiling, and a turn whose fault survived each step never
+ended. Real transcripts show the ladder advancing step after step against the same
+`tier_limit_exceeded` condition.
+
+- Default is now the Harness's own retryable set (`EMPTY_RESPONSE`, `RATE_LIMIT`,
+  `SERVER`, `TIMEOUT`, `TRANSPORT`). Anything else — including an unclassified
+  code — is left to the loop.
+- `retryCodes` and `retryAllCodes` make the scope explicit and reversible.
+  `excludeCodes` still wins over both.
+- `maxRetriesPerTurn` (default 40) stops a fault that survives every step, which
+  the per-step ladder alone could never catch.
+- Tool calls and MCP calls were never retried — see the section above, which is
+  backed by 41 recorded retries with no `tool/result` predecessor among them.
+
+If you relied on 2.x's behaviour, set `retryAllCodes: true`. The panel's
+"What gets retried" card makes that a switch rather than a config edit.
 
 ## Changelog
 

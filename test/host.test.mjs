@@ -147,7 +147,7 @@ function fakeAgent(id = "session-1", projection, emit) {
 }
 
 /** One transient failure payload. */
-function failurePayload(code = "NETWORK", extra = {}) {
+function failurePayload(code = "TRANSPORT", extra = {}) {
   return {
     agent: fakeAgent("session-1", extra.projection),
     turn: 1,
@@ -186,6 +186,9 @@ schemaTest("Config is a native schemastery schema with documented defaults", () 
     maxDelayMs: 60000,
     jitterRatio: 0.2,
     retryWithoutProviderPolicy: true,
+    retryCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
+    retryAllCodes: false,
+    maxRetriesPerTurn: 40,
     excludeCodes: [],
     recordSessionEvents: true,
     log: true,
@@ -240,7 +243,7 @@ test("durable events bracket the wait in the documented order", async () => {
   const fake = fakeContext();
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
 
-  const payload = failurePayload("RATE_LIMITED");
+  const payload = failurePayload("RATE_LIMIT");
   const action = await fake.fire("agent/request-error", payload, async () => undefined);
   assert.deepEqual(action, { kind: "retry" });
 
@@ -251,7 +254,7 @@ test("durable events bracket the wait in the documented order", async () => {
   assert.equal(scheduled.mode, "always", "an unbounded budget renders as unbounded in the chat surface");
   assert.equal(scheduled.policyKey, "unlimited-retry");
   assert.ok(scheduled.delayMs >= 1 && scheduled.delayMs <= 2);
-  assert.equal(scheduled.failure.code, "RATE_LIMITED");
+  assert.equal(scheduled.failure.code, "RATE_LIMIT");
   assert.equal(scheduled.retry, 1);
   assert.equal(payload.agent.appended[1].data.retryId, scheduled.retryId);
 });
@@ -271,7 +274,7 @@ test("a provider-requested delay is honoured but clamped by maxDelayMs", async (
   const fake = fakeContext();
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 });
 
-  const payload = failurePayload("RATE_LIMITED", { providerRetryAfterMs: 60_000 });
+  const payload = failurePayload("RATE_LIMIT", { providerRetryAfterMs: 60_000 });
   const action = await fake.fire("agent/request-error", payload, async () => undefined);
   assert.deepEqual(action, { kind: "retry" });
   assert.equal(payload.agent.appended[0].data.delayMs, 5, "the provider hint cannot exceed the ceiling");
@@ -483,7 +486,7 @@ test("a config patch with an unknown key is rejected before any write", async ()
 
   const response = captureResponse();
   await routes.get("/unlimited-retry/config").handler(
-    fakeRequest("POST", { "content-type": "application/json" }, JSON.stringify({ retryAllCodes: true })),
+    fakeRequest("POST", { "content-type": "application/json" }, JSON.stringify({ retryEveryCode: true })),
     response.res,
   );
   assert.equal(response.status, 400);
@@ -706,7 +709,7 @@ test("the cancellation guard ignores case and surrounding whitespace", async () 
 
 test("a code merely starting with ABORT is not treated as a cancellation", async () => {
   const fake = fakeContext();
-  plugin.apply(fake.ctx, { excludeCodes: [], initialDelayMs: 1, maxDelayMs: 2 });
+  plugin.apply(fake.ctx, { excludeCodes: [], retryAllCodes: true, initialDelayMs: 1, maxDelayMs: 2 });
 
   const action = await fake.fire("agent/request-error", failurePayload("ABORT_WATCHDOG_EXPIRED"), async () => undefined);
   assert.deepEqual(action, { kind: "retry" }, "the guard is an exact match, not a prefix test");
@@ -722,7 +725,7 @@ test("configured exclusions are matched canonically too", async () => {
     const action = await fake.fire("agent/request-error", failurePayload(code), async () => undefined);
     assert.equal(action, undefined, `"${code}" must match the configured exclusion`);
   }
-  const action = await fake.fire("agent/request-error", failurePayload("NETWORK"), async () => undefined);
+  const action = await fake.fire("agent/request-error", failurePayload("TRANSPORT"), async () => undefined);
   assert.deepEqual(action, { kind: "retry" }, "an unrelated code still retries");
   await fake.dispose();
 });
@@ -868,12 +871,12 @@ test("a malformed failure is delegated, never thrown from the waterfall", async 
     { agent: { session }, failure: null, signal },
     { agent: { session }, failure: "boom", signal },
     { agent: { session }, failure: 42, signal },
-    { agent: null, failure: { code: "NETWORK" }, signal },
-    { agent: "not-an-agent", failure: { code: "NETWORK" }, signal },
+    { agent: null, failure: { code: "TRANSPORT" }, signal },
+    { agent: "not-an-agent", failure: { code: "TRANSPORT" }, signal },
     { agent: { session }, failure: { message: "x", code: 42 }, signal },
     { agent: { session }, failure: { message: "x", code: "" }, signal },
-    { agent: { session }, failure: { message: "x", code: "NETWORK" } },
-    { agent: { session }, failure: { message: "x", code: "NETWORK" }, signal: null },
+    { agent: { session }, failure: { message: "x", code: "TRANSPORT" } },
+    { agent: { session }, failure: { message: "x", code: "TRANSPORT" }, signal: null },
   ];
 
   for (const payload of hostile) {
@@ -891,7 +894,7 @@ test("an absurd provider delay cannot escape the ceiling", async () => {
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 });
 
   for (const providerRetryAfterMs of [1e15, Number.MAX_SAFE_INTEGER, Number.POSITIVE_INFINITY, -5, Number.NaN]) {
-    const payload = failurePayload("RATE_LIMITED", { providerRetryAfterMs });
+    const payload = failurePayload("RATE_LIMIT", { providerRetryAfterMs });
     const action = await fake.fire("agent/request-error", payload, async () => undefined);
     assert.deepEqual(action, { kind: "retry" });
     const recorded = payload.agent.appended[0].data.delayMs;
@@ -1120,5 +1123,92 @@ test("records stay internally consistent with the counters", async () => {
   assert.equal(providerSum, 3, "and once by provider");
   // Attempts restart per step, so newest-first within one step counts down.
   assert.deepEqual(after.recent.slice(0, 3).map((row) => row.attempt), [3, 2, 1]);
+  await fake.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Retry scope: 2.x retried every code except a cancellation.
+//
+// That default produced endless turns in practice. The plugin now retries only
+// the codes the Harness itself declares retryable, and a code it does not
+// recognise is terminal — because "unrecognised" is precisely what an adapter
+// emits when it has already decided the failure is not worth re-sending.
+// ---------------------------------------------------------------------------
+
+test("an adapter code the Harness calls non-retryable is never retried by default", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  // pi-ai emits PI_AI_ERROR for its explicitly non-retryable `pending` and
+  // `deferred` states, and for stream errors it cannot classify. 2.x retried it.
+  const action = await fake.fire("agent/request-error", failurePayload("PI_AI_ERROR"), async () => undefined);
+  assert.equal(action, undefined, "left to the loop");
+  await fake.dispose();
+});
+
+test("an unclassified code is terminal, and the decision is counted", async () => {
+  const routes = new Map();
+  const fake = fakeContext({
+    services: { webServer: { register: (route) => (routes.set(route.path, route), () => {}) }, connection: { requestRejection: () => undefined } },
+  });
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("SOMETHING_NEW"), async () => undefined);
+  assert.equal(action, undefined);
+
+  const response = captureResponse();
+  routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), response.res);
+  const stats = JSON.parse(response.text()).stats;
+  assert.ok(
+    stats.terminalSeen.some((row) => row.code === "SOMETHING_NEW"),
+    "the panel must show why nothing happened",
+  );
+  await fake.dispose();
+});
+
+test("retryAllCodes opts back into retrying a code outside the set", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { retryAllCodes: true, initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("PI_AI_ERROR"), async () => undefined);
+  assert.deepEqual(action, { kind: "retry" });
+  await fake.dispose();
+});
+
+test("excludeCodes still wins over the retry set", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { excludeCodes: ["TRANSPORT"], initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("TRANSPORT"), async () => undefined);
+  assert.equal(action, undefined, "an explicit exclusion overrides an allowed code");
+  await fake.dispose();
+});
+
+test("the turn ceiling stops a fault that survives every step", async () => {
+  // The step ladder restarts at 1 every step, so a persistent fault would spend
+  // the whole budget again and again and the turn would never end. The ceiling is
+  // what makes that impossible, whatever the code says.
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { maxRetriesPerTurn: 3, initialDelayMs: 1, maxDelayMs: 2 });
+
+  // One durable session that drives the real projection fold, so the ceiling is
+  // measured where it actually lives rather than against an always-empty cell.
+  const projection = fake.services.get("sessionProjections");
+  const agent = fakeAgent("turn-ceiling", projection, (session, event) =>
+    fake.listeners.get("session/event")?.(session, event)).session;
+
+  const results = [];
+  for (let step = 1; step <= 4; step += 1) {
+    const payload = failurePayload("TRANSPORT", {});
+    payload.step = step;
+    payload.agent = { session: agent };
+    results.push(await fake.fire("agent/request-error", payload, async () => undefined));
+  }
+
+  assert.deepEqual(
+    results.map((action) => (action === undefined ? "declined" : action.kind)),
+    ["retry", "retry", "retry", "declined"],
+    "three retries inside the turn, then the loop gets the failure back",
+  );
   await fake.dispose();
 });
