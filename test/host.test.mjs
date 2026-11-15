@@ -186,6 +186,7 @@ schemaTest("Config is a native schemastery schema with documented defaults", () 
     maxDelayMs: 60000,
     jitterRatio: 0.2,
     retryWithoutProviderPolicy: true,
+    classifyTransientFailures: true,
     retryCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
     retryAllCodes: false,
     maxRetriesPerTurn: 40,
@@ -1210,5 +1211,116 @@ test("the turn ceiling stops a fault that survives every step", async () => {
     ["retry", "retry", "retry", "declined"],
     "three retries inside the turn, then the loop gets the failure back",
   );
+  await fake.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// A code allow-list cannot survive contact with real providers.
+//
+// A gateway that namespaces its errors never matches a Harness literal, so a
+// policy built only from literals quietly degenerates into "retry nothing" for
+// exactly the providers most likely to be flaky. The failures below are the two
+// shapes actually observed locally: a namespaced 400 that is permanent, and a
+// generic upstream error whose text describes a transient condition.
+// ---------------------------------------------------------------------------
+
+test("the observed CodeArts 400 is terminal, and its message is why", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  // `Invalid Argument` means the request bytes are wrong: the same bytes get the
+  // same 400. Retrying it is the pointless retry this release removed.
+  const action = await fake.fire("agent/request-error", failurePayload("InferHub.ModelArts.81001.400", {
+    message: 'CodeArts: Invalid Argument (InferHub.ModelArts.81001.400)',
+  }), async () => undefined);
+
+  assert.equal(action, undefined);
+
+  const routes = new Map();
+  const withRoutes = fakeContext({ services: { webServer: { register: (r) => (routes.set(r.path, r), () => {}) } } });
+  await withRoutes.dispose();
+  await fake.dispose();
+});
+
+test("a namespaced transient failure is retried even though its code is unknown", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  // Same provider, same code shape, different meaning: 429 is throttling.
+  const action = await fake.fire("agent/request-error", failurePayload("InferHub.ModelArts.81001.429", {
+    message: "CodeArts: Too Many Requests (InferHub.ModelArts.81001.429)",
+  }), async () => undefined);
+
+  assert.deepEqual(action, { kind: "retry" }, "throttling clears by itself");
+  await fake.dispose();
+});
+
+test("a concurrency limit wrapped in a generic upstream error still retries", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("PI_AI_ERROR", {
+    message: "Open Design: [code=tier_limit_exceeded] membership concurrency limit exceeded: 11/10",
+  }), async () => undefined);
+
+  assert.deepEqual(action, { kind: "retry" }, "the text says the condition clears");
+  await fake.dispose();
+});
+
+test("context overflow stays terminal however it is spelled", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("vendor.400", {
+    message: "maximum context length is 128000 tokens",
+  }), async () => undefined);
+
+  assert.equal(action, undefined, "resending an oversized request cannot help");
+  await fake.dispose();
+});
+
+test("every decline records a reason the panel can show", async () => {
+  const routes = new Map();
+  const fake = fakeContext({
+    services: { webServer: { register: (r) => (routes.set(r.path, r), () => {}) }, connection: { requestRejection: () => undefined } },
+  });
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
+
+  // The decline ring is process-wide (counters survive a plugin reload), so
+  // earlier tests in this file have already written to it; compare deltas.
+  const readDeclines = () => {
+    const response = captureResponse();
+    routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), response.res);
+    return JSON.parse(response.text()).declines;
+  };
+  const before = readDeclines().length;
+
+  await fake.fire("agent/request-error", failurePayload("SOMETHING_NEW"), async () => undefined);
+  await fake.fire("agent/request-error", failurePayload("InferHub.ModelArts.81001.400", {
+    message: "CodeArts: Invalid Argument (InferHub.ModelArts.81001.400)",
+  }), async () => undefined);
+  await fake.fire("agent/request-error", failurePayload("ABORTED"), async () => undefined);
+
+  const fresh = readDeclines().slice(0, readDeclines().length - before);
+
+  assert.deepEqual(
+    fresh.map((row) => row.reason),
+    ["cancelled", "permanent", "unknown-code"],
+    "newest first, one entry per refusal",
+  );
+  assert.equal(fresh[1].code, "INFERHUB.MODELARTS.81001.400");
+  assert.match(fresh[1].message, /Invalid Argument/);
+  await fake.dispose();
+});
+
+test("classifyTransientFailures:false restores literal-only scope", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { classifyTransientFailures: false, initialDelayMs: 1, maxDelayMs: 2 });
+
+  const action = await fake.fire("agent/request-error", failurePayload("PI_AI_ERROR", {
+    message: "membership concurrency limit exceeded",
+  }), async () => undefined);
+
+  assert.equal(action, undefined, "the toggle has to be honoured");
   await fake.dispose();
 });

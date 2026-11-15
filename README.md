@@ -390,6 +390,35 @@ every `-rc` build.
 - A 1.x `config` still mounts: `retryAllCodes` is ignored and `terminalCodes` is read as `excludeCodes`, each with a one-line warning naming the replacement.
 - The Web panel additionally needs `configEditor` and the `settings.section` slot. Without them the policy still applies; the page is simply absent or read-only.
 
+### How an unfamiliar code is judged
+
+Codes are not the only evidence. When a failure's code is not one this plugin
+recognises, it reads the message, because a provider that namespaces its own
+errors — `InferHub.ModelArts.81001.400` is one observed shape — can never match a
+Harness literal, and a policy built only from literals therefore degrades to
+"retry nothing" for exactly the providers most likely to be flaky.
+
+| Evidence in the message | Verdict |
+|---|---|
+| `rate limit`, `concurrency limit`, `too many requests`, `timeout`, `connection reset`, `socket hang up`, `502/503/504` | **retry** |
+| `invalid argument`, `invalid request`, `unsupported`, `context length`, `payload too large`, `unauthorized`, `quota`, `billing` | **terminal** |
+| HTTP 400 except 408/409/425/429, and any other 4xx | **terminal** |
+| HTTP 429, 408, 409, 425, and any 5xx | **retry** |
+| nothing recognisable | **terminal**, and listed in the panel |
+
+Transient evidence is checked before permanent evidence on purpose: a gateway can
+wrap a recoverable condition in a 4xx (the local `tier_limit_exceeded ... concurrency
+limit exceeded` failure arrived as a generic upstream error), and wrongly declining
+a transient failure strands a working turn, while wrongly retrying a permanent one is
+bounded by the turn ceiling.
+
+Turn this off with `classifyTransientFailures: false` to restore literal-only
+matching.
+
+**Nothing here is silent.** Every refusal lands in a *Left to the loop* table in the
+panel with its code, its reason, and its original message, plus a one-click
+*Retry this code too* button that adds it to `retryCodes`.
+
 ## What this plugin does not touch: tool calls and MCP calls
 
 A retry here **re-issues the model request only.** It never re-runs a tool.
@@ -412,6 +441,23 @@ model or to the tool, not to this plugin:
 - an **MCP server** that returns errors will keep returning them until it is fixed;
 - this plugin only decides whether to re-send the *request*, and since 3.0.0 it only
   does so for codes that can plausibly recover.
+
+### 3.1.0
+
+3.0.0 fixed over-retry by allowing only five codes — and over-corrected. A provider
+that namespaces its errors (`InferHub.ModelArts.81001.400`) never matches a literal,
+so that provider stopped being retried for anything at all, transient or not.
+
+- An unfamiliar code is now judged by its message: rate/concurrency limits, timeouts,
+  connection failures and 5xx retry; invalid argument, context overflow, auth, quota
+  and other 4xx stay terminal.
+- The reported `CodeArts: Invalid Argument` 400 stays terminal — the bytes are wrong,
+  so the same bytes get the same 400. That part of the 3.0.0 decision was right.
+- Every refusal is listed in the panel with its reason and original message, and each
+  row offers *Retry this code too*. A plugin that declines silently is indistinguishable
+  from a broken one; that was the real complaint behind the 3.0.0 question.
+- `classifyTransientFailures` turns the message reading off if you would rather judge
+  by code alone.
 
 ### 3.0.0
 

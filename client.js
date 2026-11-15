@@ -78,6 +78,18 @@ window.__ModuleLoader__.load({
       withoutPolicyHint: "Also retry when the serving adapter published no retryPolicy.",
       recordEvents: "Record session events",
       recordEventsHint: "Append llm/retry and llm/retry-started so the chat surface shows the chain.",
+      reasonCancelled: "Cancellation",
+      reasonExcluded: "Excluded in the list below",
+      reasonPermanent: "The failure itself says a retry cannot clear it",
+      reasonUnknown: "Unfamiliar code with no transient evidence",
+      declinesTitle: "Left to the loop",
+      declinesHint: "Failures this plugin declined to retry, newest first, with the reason. A silent decline is indistinguishable from a broken plugin, so every one is listed.",
+      declinesEmpty: "No failure has been declined since this process started.",
+      retryThisCode: "Retry this code too",
+      colReason: "Reason",
+      classify: "Read the failure message",
+      classifyHint: "Judge an unfamiliar code by what its message says — rate limit, timeout, invalid argument — instead of declining it outright.",
+
       scopeTitle: "What gets retried",
       scopeHint: "Only codes in this list are retried. Anything else — including a code no adapter classified — is left to the loop, because an unrecognised failure is not evidence that a retry helps.",
       retryAll: "Retry every code",
@@ -173,6 +185,18 @@ window.__ModuleLoader__.load({
       withoutPolicyHint: "当 provider 适配器没有发布 retryPolicy 时同样重试。",
       recordEvents: "写入会话事件",
       recordEventsHint: "追加 llm/retry 与 llm/retry-started，聊天界面才会显示重试链路。",
+      reasonCancelled: "取消", 
+      reasonExcluded: "在下方的终止列表中",
+      reasonPermanent: "失败本身说明重试无法解决",
+      reasonUnknown: "陌生错误码，且信息里没有瞬时故障的证据",
+      declinesTitle: "交回上层",
+      declinesHint: "本插件决定不重试的失败，按时间倒序，附原因。静默不重试和插件坏掉无法区分，所以每一条都列出来。",
+      declinesEmpty: "本进程启动以来没有拒过任何失败。",
+      retryThisCode: "这个码也重试",
+      colReason: "原因",
+      classify: "读取失败信息",
+      classifyHint: "陌生错误码按信息内容判断（限流、超时、参数非法），而不是一律拒掉。",
+
       scopeTitle: "哪些错误会被重试",
       scopeHint: "只有在列表里的错误码会重试。其他一律交回上层——包括适配器没能归类的错误码：一个无法识别的失败，并不能作为「重试会有用」的依据。",
       retryAll: "重试所有错误码",
@@ -970,6 +994,20 @@ window.__ModuleLoader__.load({
             describedById: "du-retry-all-hint",
           })),
 
+          React.createElement(Field, {
+            key: "classify",
+            id: "du-classify",
+            label: t("classify"),
+            hint: t("classifyHint"),
+          }, React.createElement(Switch, {
+            id: "du-classify",
+            checked: config.classifyTransientFailures !== false,
+            disabled: !writable || pending || config.autoRetry !== true,
+            onChange: (next) => patch({ classifyTransientFailures: next }),
+            labelId: "du-classify-label",
+            describedById: "du-classify-hint",
+          })),
+
           retryingEverything
             ? React.createElement("div", { key: "allnote", className: "duFieldHint" }, t("retryAllNote"))
             : React.createElement("div", { key: "chips", className: "duChips" }, retrySet.length === 0
@@ -1329,6 +1367,7 @@ window.__ModuleLoader__.load({
       }));
 
       const recent = Array.isArray(stats.recent) ? stats.recent : [];
+      const declines = Array.isArray(data.declines) ? data.declines : [];
 
       return React.createElement("div", { className: "duRoot" }, [
         styleTag,
@@ -1442,6 +1481,61 @@ window.__ModuleLoader__.load({
                         }, fmt.relative(row.at, now)),
                       ]),
                     )),
+                  ]),
+                ),
+          ),
+        ]),
+
+        // Why nothing happened. This is the answer to "why was that not retried?",
+        // which a plugin that only shows retries can never give.
+        React.createElement("div", { key: "declines", className: "duCard" }, [
+          React.createElement("div", { key: "h", className: "duCardHead" }, [
+            React.createElement("div", { key: "t", className: "duCardTitle" }, t("declinesTitle")),
+          ]),
+          React.createElement("div", { key: "hint", className: "duCardHint" }, t("declinesHint")),
+          React.createElement("div", { key: "b", className: "duCardBody" },
+            declines.length === 0
+              ? React.createElement("div", { className: "duEmptyLine" }, t("declinesEmpty"))
+              : React.createElement("div", { className: "duTableWrap" },
+                  React.createElement("table", { className: "duTable" }, [
+                    React.createElement("thead", { key: "head" },
+                      React.createElement("tr", null, [
+                        React.createElement("th", { key: "c", scope: "col" }, t("colCode")),
+                        React.createElement("th", { key: "r", scope: "col" }, t("colReason")),
+                        React.createElement("th", { key: "w", scope: "col" }, t("colWhen")),
+                        React.createElement("th", { key: "a", scope: "col" }, ""),
+                      ]),
+                    ),
+                    React.createElement("tbody", { key: "body" }, declines.map((row, index) => {
+                      const reasonLabel = {
+                        cancelled: t("reasonCancelled"),
+                        excluded: t("reasonExcluded"),
+                        permanent: t("reasonPermanent"),
+                        "unknown-code": t("reasonUnknown"),
+                      }[row.reason] ?? String(row.reason);
+                      const alreadyRetried = retrySet.includes(row.code) || retryingEverything;
+                      return React.createElement("tr", { key: `${row.at}-${index}` }, [
+                        React.createElement("td", { key: "c", "data-mono": "true", title: row.message ?? "" }, row.code),
+                        React.createElement("td", { key: "r" }, reasonLabel),
+                        React.createElement("td", {
+                          key: "w",
+                          "data-muted": "true",
+                          title: fmt.clock(row.at),
+                        }, fmt.relative(row.at, now)),
+                        React.createElement("td", { key: "a" },
+                          // Cancellations and explicit exclusions are policy, not
+                          // an oversight, so they get no "add it back" affordance.
+                          row.reason === "permanent" || row.reason === "unknown-code"
+                            ? React.createElement("button", {
+                                type: "button",
+                                className: "duBtn",
+                                "data-variant": "quiet",
+                                disabled: !writable || pending || alreadyRetried,
+                                onClick: () => patch({ retryCodes: [...retrySet, row.code] }),
+                              }, alreadyRetried ? t("unlimited") : t("retryThisCode"))
+                            : null),
+                      ]);
+                    })),
                   ]),
                 ),
           ),

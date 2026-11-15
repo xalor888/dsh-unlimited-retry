@@ -6,6 +6,10 @@
 #
 # Defaults are deliberate:
 #   autoRetry: true          — the plugin's entire reason to exist
+#   classifyTransientFailures: true
+#               — judge an unfamiliar code by its message (rate limit, timeout,
+#                 invalid argument). Without this, a provider that namespaces its
+#                 errors ('InferHub.ModelArts.81001.429') is never retried at all.
 #   retryCodes: the five the Harness itself retries (EMPTY_RESPONSE, RATE_LIMIT,
 #               SERVER, TIMEOUT, TRANSPORT). Anything else is the upstream
 #               layer's judgement that re-sending will not help: a code nobody
@@ -29,6 +33,7 @@
         maxDelayMs: 60000
         jitterRatio: 0.2
         retryWithoutProviderPolicy: true
+        classifyTransientFailures: true
         retryCodes:
           - EMPTY_RESPONSE
           - RATE_LIMIT

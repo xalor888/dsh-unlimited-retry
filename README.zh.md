@@ -303,6 +303,24 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - 1.x 的 `config` 仍可挂载：`retryAllCodes` 被忽略（除非显式排除，否则每个码都会重试），`terminalCodes` 按 `excludeCodes` 读取，两者各打一条替代提示。
 - Web 面板另需 `configEditor` 与 `settings.section` 槽位；缺这些时策略照常生效，页面只是不存在或只读。
 
+### 陌生错误码是怎么判断的
+
+判断依据不只是错误码。当失败的错误码不在本插件的识别范围内时，它会去读信息内容 —— 因为一个给错误码加命名空间的 provider（实测形状之一就是 `InferHub.ModelArts.81001.400`）永远匹配不上 Harness 的字面量，只靠字面量的策略在**最容易抽风的那类 provider 上会退化成「什么都不重试」**。
+
+| 信息里的证据 | 结论 |
+|---|---|
+| `rate limit`、`concurrency limit`、`too many requests`、`timeout`、`connection reset`、`socket hang up`、`502/503/504` | **重试** |
+| `invalid argument`、`invalid request`、`unsupported`、`context length`、`payload too large`、`unauthorized`、`quota`、`billing` | **终止** |
+| HTTP 400（408/409/425/429 除外）以及其它 4xx | **终止** |
+| HTTP 429、408、409、425 以及任何 5xx | **重试** |
+| 什么都认不出来 | **终止**，并在面板里列出来 |
+
+瞬时证据先于永久证据检查，这是故意的：网关可能把一个可恢复的情况包在 4xx 里（本机那条 `tier_limit_exceeded ... concurrency limit exceeded` 就是以通用上游错误形态到达的）；错判成终止会让本来能跑通的一轮直接失败，而错判成重试有每轮上限兜着。
+
+设 `classifyTransientFailures: false` 可以关掉它，退回纯字面量匹配。
+
+**这里没有静默。** 每一次拒绝都会进面板的「交回上层」表格，带上错误码、原因、原始信息，以及一个**「这个码也重试」**的一键按钮（点它就把该码加进 `retryCodes`）。
+
 ## 本插件不碰的东西：工具调用与 MCP 调用
 
 这里的重试**只重发模型请求**，从不重跑工具。
@@ -316,6 +334,15 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - **模型**一直挑那个失败的工具 —— 这是 `dsh-repeat-tool-reminder` 负责的事；
 - **MCP 服务**返回错误，在修好之前会一直返回错误；
 - 本插件只决定要不要重发**请求**，而且从 3.0.0 起只对那些「有可能恢复」的错误码这么做。
+
+### 3.1.0
+
+3.0.0 用「只放行 5 个码」修掉了过度重试，但**修过头了**：给错误码加命名空间的 provider（`InferHub.ModelArts.81001.400`）永远匹配不上字面量，于是那家 provider 连真实的限流、超时也一并不再重试。
+
+- 陌生错误码改为按信息内容判断：限流/并发限制、超时、连接失败、5xx → 重试；参数非法、上下文溢出、认证、配额、其它 4xx → 终止。
+- 你贴的那个 `CodeArts: Invalid Argument` 400 **仍然终止** —— 请求字节本身是错的，同样的字节只会再拿到同样的 400。3.0.0 的这部分判断是对的。
+- 每一次拒绝都进面板，带原因和原始信息，每行都有一个**「这个码也重试」**按钮。静默不重试和插件坏掉无法区分 —— 这才是 3.0.0 之后那个疑问真正指向的东西。
+- 只想按错误码判断的话，把 `classifyTransientFailures` 关掉。
 
 ### 3.0.0
 

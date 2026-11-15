@@ -40,7 +40,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "3.0.0";
+const PLUGIN_VERSION = "3.1.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -98,6 +98,136 @@ const HARNESS_RETRYABLE_CODES = Object.freeze([
 
 /** Default allow-list; see {@link HARNESS_RETRYABLE_CODES}. */
 const DEFAULT_RETRY_CODES = HARNESS_RETRYABLE_CODES;
+
+/**
+ * Conditions a retry can actually clear, recognised from the failure text.
+ *
+ * This exists because an allow-list of literal codes cannot survive contact with
+ * real providers. A gateway that namespaces its errors — the observed example is
+ * `InferHub.ModelArts.81001.400` — never matches a Harness literal, so a policy
+ * built only from literals degenerates into "retry nothing" for exactly the
+ * providers most likely to be flaky.
+ *
+ * Transient markers are checked before permanent ones. That ordering is
+ * deliberate: a gateway may wrap a recoverable condition in a 4xx (the
+ * `tier_limit_exceeded ... concurrency limit exceeded` failure seen locally
+ * arrived as a generic upstream error), and wrongly declining such a failure is
+ * worse than wrongly retrying it, because the turn ceiling bounds the latter.
+ */
+const TRANSIENT_SIGNAL = new RegExp([
+  String.raw`rate.?limit`,
+  String.raw`too many requests`,
+  String.raw`concurren\w* (?:limit|exceeded)`,
+  String.raw`\bbusy\b`,
+  String.raw`overloaded`,
+  String.raw`try again`,
+  String.raw`retry later`,
+  String.raw`please retry`,
+  String.raw`temporarily`,
+  String.raw`unavailable`,
+  String.raw`capacity`,
+  String.raw`queue is full`,
+  String.raw`\btimed? ?out\b`,
+  String.raw`timeout`,
+  String.raw`deadline exceeded`,
+  String.raw`connection (?:reset|refused|closed|error)`,
+  String.raw`\bECONN[A-Z]+\b|\bEAI_AGAIN\b|\bEPIPE\b|\bENOTFOUND\b|\bETIMEDOUT\b`,
+  String.raw`socket hang up`,
+  String.raw`other side closed`,
+  String.raw`premature close`,
+  String.raw`stream ended (?:before|without)`,
+  String.raw`\b5(?:0[0-9]|2[0-9]|29)\b`,
+  String.raw`internal server error`,
+  String.raw`bad gateway`,
+  String.raw`gateway time-?out`,
+  String.raw`service unavailable`,
+].join("|"), "i");
+
+/**
+ * Conditions a retry cannot clear: the same bytes produce the same rejection.
+ *
+ * `invalid argument` is here because that is what a malformed request reports,
+ * and re-sending an identical malformed request is the definition of a pointless
+ * retry. The observed `CodeArts: Invalid Argument (...)` failure is one of these.
+ */
+const PERMANENT_SIGNAL = new RegExp([
+  String.raw`invalid argument`,
+  String.raw`invalid.?request`,
+  String.raw`invalid.?param`,
+  String.raw`invalid.?api.?key`,
+  String.raw`malformed`,
+  String.raw`unsupported`,
+  String.raw`not supported`,
+  String.raw`unrecognized`,
+  String.raw`param\w*.?(?:error|invalid)`,
+  String.raw`\bno_?adapter\b`,
+  String.raw`context.?(?:window|length|overflow)`,
+  String.raw`maximum context`,
+  String.raw`too long`,
+  String.raw`payload too large`,
+  String.raw`length limit exceeded`,
+  String.raw`billing`,
+  String.raw`insufficient (?:balance|quota|funds)`,
+  String.raw`quota`,
+  String.raw`unauthorized`,
+  String.raw`unauthenticated`,
+  String.raw`forbidden`,
+  String.raw`authentication`,
+  String.raw`invalid.?credential`,
+  String.raw`model.?not.?found`,
+  String.raw`^\s*40[0-9]\b`,
+].join("|"), "i");
+
+/** Status tokens the failure text may carry, in the shapes providers use. */
+const STATUS_TOKEN = /(?:^|[^0-9])([1-5][0-9]{2})(?:[^0-9]|$)/g;
+
+/**
+ * The status a failure reported, if its text carries one.
+ *
+ * Only four- and five-hundred values count: a message that happens to contain
+ * `81001` or a token count must not be read as a status, which is why the search
+ * skips the middle of a longer number run.
+ * @param texts - texts to scan, most specific first.
+ * @returns the status, or undefined when none is present.
+ */
+function statusOf(...texts) {
+  for (const text of texts) {
+    if (typeof text !== "string" || text.length === 0) continue;
+    for (const match of text.matchAll(STATUS_TOKEN)) {
+      const status = Number(match[1]);
+      if (status >= 400 && status <= 599) return status;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Decide whether a failure looks recoverable, from what it says rather than how
+ * its code is spelled.
+ * @param failure - the failure the loop reported.
+ * @returns `"retry"` (retry it), `"stop"` (terminal), or `"unknown"`.
+ */
+function classifyFailure(failure) {
+  const message = typeof failure?.message === "string" ? failure.message : "";
+  const code = typeof failure?.code === "string" ? failure.code : "";
+  const status = statusOf(message, code);
+
+  // Evidence that the condition clears beats evidence that it will not, because
+  // a mis-declined transient failure strands a working turn while a mis-retried
+  // permanent one is bounded by the turn ceiling.
+  if (TRANSIENT_SIGNAL.test(message) || TRANSIENT_SIGNAL.test(code)) return "retry";
+  if (PERMANENT_SIGNAL.test(message) || PERMANENT_SIGNAL.test(code)) return "stop";
+
+  if (status !== undefined) {
+    // 408 (request timeout), 409 (conflict), 425 (too early) and 429 (throttled)
+    // are the four-hundreds that a retry can clear; every other 4xx is the
+    // request's own fault.
+    if ([408, 409, 425, 429].includes(status)) return "retry";
+    if (status >= 400 && status < 500) return "stop";
+    return "retry";
+  }
+  return "unknown";
+}
 
 /**
  * Every failure code the Harness itself can produce, for the panel's picker.
@@ -162,6 +292,8 @@ const DEFAULTS = Object.freeze({
   jitterRatio: 0.2,
   /** Retry even when the serving adapter published no retryPolicy at all. */
   retryWithoutProviderPolicy: true,
+  /** Read the failure text for transient/permanent evidence, not just the code. */
+  classifyTransientFailures: true,
   /** Codes this layer will retry; everything else is left to the loop. */
   retryCodes: DEFAULT_RETRY_CODES,
   /** Retry any code that is not always-terminal and not excluded. */
@@ -185,6 +317,7 @@ const KNOWN_KEYS = Object.freeze([
   "maxDelayMs",
   "jitterRatio",
   "retryWithoutProviderPolicy",
+  "classifyTransientFailures",
   "retryCodes",
   "retryAllCodes",
   "maxRetriesPerTurn",
@@ -229,7 +362,8 @@ async function loadConfigSchema() {
     // `normalize()` instead, which is stricter than a hint either way.
     jitterRatio: schemastery.number().min(0).max(1).default(0.2).description("Randomization applied to each delay, as a fraction of the nominal value."),
     retryWithoutProviderPolicy: schemastery.boolean().default(true).description("Retry even when the serving adapter published no retryPolicy."),
-    retryCodes: schemastery.array(schemastery.string()).default([...DEFAULT_RETRY_CODES]).description("Failure codes this plugin retries. Any other code is left to the loop."),
+    classifyTransientFailures: schemastery.boolean().default(true).description("Judge an unfamiliar code by what its message says (rate limit, timeout, invalid argument) instead of declining it outright."),
+    retryCodes: schemastery.array(schemastery.string()).default([...DEFAULT_RETRY_CODES]).description("Failure codes this plugin retries. Any other code is left to the loop unless its message is evidence of a transient condition."),
     retryAllCodes: schemastery.boolean().default(false).description("Retry every code that is not always-terminal and not excluded, including unclassified adapter codes."),
     maxRetriesPerTurn: nullableCount.default(DEFAULTS.maxRetriesPerTurn).description("Hard ceiling on retries inside one turn. Empty or null means no turn ceiling."),
     excludeCodes: schemastery.array(schemastery.string()).default([]).description("Failure codes that stay terminal even when listed in retryCodes."),
@@ -420,6 +554,7 @@ function normalize(raw) {
     maxDelayMs,
     jitterRatio,
     retryWithoutProviderPolicy: source.retryWithoutProviderPolicy !== false,
+    classifyTransientFailures: source.classifyTransientFailures !== false,
     retryAllCodes: source.retryAllCodes === true,
     retryCodes,
     maxRetriesPerTurn,
@@ -445,6 +580,7 @@ function configPayload(cfg) {
     jitterRatio: cfg.jitterRatio,
     retryWithoutProviderPolicy: cfg.retryWithoutProviderPolicy,
     retryCodes: [...cfg.retryCodes],
+    classifyTransientFailures: cfg.classifyTransientFailures,
     retryAllCodes: cfg.retryAllCodes,
     maxRetriesPerTurn: cfg.maxRetriesPerTurn,
     excludeCodes: [...cfg.excludeCodes],
@@ -552,6 +688,9 @@ function sharedStats() {
   if (existing !== undefined) return existing;
   const created = {
     mountedAt: new Date().toISOString(),
+    // Why a failure was left to the loop, newest first. A retry plugin that stays
+    // silent about declining is indistinguishable from one that is broken.
+    declines: [],
     mounts: 0,
     totalRetries: 0,
     lastRetryAt: null,
@@ -725,6 +864,7 @@ function validateConfigPatch(patch) {
  * @param ctx - the plugin context.
  * @param config - the Loader row's `config`, validated by `Config` when present.
  */
+export { classifyFailure, statusOf };
 export function apply(ctx, config) {
   const cfg = normalize(config);
   const stats = sharedStats();
@@ -1074,6 +1214,9 @@ export function apply(ctx, config) {
         terminalSeen: pairs(stats.terminalSeen).map(([code, count]) => ({ code, count })),
         recent: stats.recent.slice(0, RECENT_LIMIT),
       },
+      // Separated from `stats` because the panel renders it as an explanation,
+      // not as a counter, and it carries the only record of what was refused.
+      declines: stats.declines.slice(0, RECENT_LIMIT),
     };
   }
 
@@ -1162,30 +1305,57 @@ export function apply(ctx, config) {
     // policy: `dsh-llm` reports `ABORTED` for a cancelled signal even when the
     // loop's own signal has not flipped yet, so an unguarded retry here would
     // re-run work the user stopped.
-    if (ALWAYS_TERMINAL.has(code)) {
+    /**
+     * Refuse a failure, and say why in a way the panel can show.
+     *
+     * Every decline is recorded: a plugin that silently does nothing is
+     * indistinguishable from one that is broken, and the operator has no way to
+     * learn which code needs adding.
+     */
+    const decline = (reason, detail) => {
       bump(stats.terminalSeen, code);
-      log("info", `failure "${code}" is a cancellation, not a fault; left to the loop`);
+      stats.declines.unshift({
+        at: new Date().toISOString(),
+        code,
+        reason,
+        detail,
+        message: typeof failure.message === "string" ? failure.message.slice(0, 300) : "",
+      });
+      if (stats.declines.length > RECENT_LIMIT) stats.declines.length = RECENT_LIMIT;
+      log("info", `failure "${code}" left to the loop: ${detail}`);
       return downstream;
+    };
+
+    if (ALWAYS_TERMINAL.has(code)) {
+      return decline("cancelled", "a cancellation is not a fault");
     }
 
     if (cfg.excludeCodes.has(code)) {
-      bump(stats.terminalSeen, code);
-      log("info", `failure "${code}" is terminal here; left to the loop`);
-      return downstream;
+      return decline("excluded", "listed in excludeCodes");
+    }
+
+    // What the failure says, when its code is not enough to tell.
+    //
+    // A provider that namespaces its errors (`InferHub.ModelArts.81001.400`) never
+    // matches a Harness literal, so a policy built only from literals degrades to
+    // "retry nothing" for precisely the providers most likely to be flaky.
+    const verdict = cfg.classifyTransientFailures ? classifyFailure(failure) : "unknown";
+    if (verdict === "retry") {
+      log("info", `failure "${code}" reports a recoverable condition; retrying`);
+    } else if (verdict === "stop") {
+      return decline("permanent", "the failure itself says a retry cannot clear it");
     }
 
     // Retry scope. A code outside the allow-list is the Harness's own signal that
     // re-sending will not help, or an adapter code nobody classified — and an
     // unclassified code is exactly what produced the endless turns under 2.x,
     // where everything except a cancellation was retried.
-    if (!cfg.retryAllCodes && !cfg.retryCodes.has(code)) {
-      bump(stats.terminalSeen, code);
-      log(
-        "info",
-        `failure "${code}" is outside the retry set; left to the loop `
+    if (verdict !== "retry" && !cfg.retryAllCodes && !cfg.retryCodes.has(code)) {
+      return decline(
+        "unknown-code",
+        `code is not in the retry set and its message carries no transient evidence `
           + `(retryCodes: ${[...cfg.retryCodes].join(", ") || "none"})`,
       );
-      return downstream;
     }
 
     // The ladder is keyed by the session, never by the agent object: the session
@@ -1368,6 +1538,7 @@ export function apply(ctx, config) {
         stats.byProvider = Object.create(null);
         stats.terminalSeen = Object.create(null);
         stats.recent = [];
+        stats.declines = [];
         sendJson(res, 200, { ok: true, stats: snapshot().stats });
       },
     }), "unlimited-retry: reset route");
