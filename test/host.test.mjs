@@ -27,6 +27,7 @@ function fakeContext(options = {}) {
   function base() {
     return {
       logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+      fiber: options.fiber ?? { entry: { options: { id: "unlimited-retry" } } },
       ...serviceProps(),
       on(event, listener) {
         listeners.set(event, listener);
@@ -63,34 +64,23 @@ function fakeContext(options = {}) {
   services.set("sessionProjections", {
     register(definition) {
       projections.set(definition.key, definition);
-      if (options.modernProjections === true) {
-        // 0.2.2 shape, faithfully: a CALLABLE thenable. `typeof` reports "function"
-        // while it still carries `then`, and a detector that only accepts objects
-        // silently misses it — which is how the handle was first not adopted.
-        const handle = {
-          stateOf: (session) => {
-            const id = session?.id ?? "unidentified-session";
-            return projectionCells.get(id)?.get(definition.key) ?? definition.init();
-          },
-          readerFor: (session) => () => handle.stateOf(session),
-        };
-        const thenable = () => undefined;
-        thenable.then = (onFulfilled, onRejected) => Promise.resolve(handle).then(onFulfilled, onRejected);
-        thenable.catch = (onRejected) => Promise.resolve(handle).catch(onRejected);
-        return thenable;
+      if (options.registrationFailure === true) {
+        return Promise.reject(new Error("registration failed"));
       }
-      return () => projections.delete(definition.key);
-    },
-    stateOf(session, key) {
-      // From 0.2.2 this reader is deprecated. Fail loudly if the plugin reaches for
-      // it when a handle was available, so the adaptive path cannot silently regress.
-      if (options.modernProjections === true) {
-        throw new Error("deprecated stateOf(session, key) used while a handle was available");
-      }
-      const definition = projections.get(key);
-      if (definition === undefined) return undefined;
-      const id = session?.id ?? "unidentified-session";
-      return projectionCells.get(id)?.get(key) ?? definition.init();
+      // 0.2.3 shape: a thenable delivering the retention handle. `stateOf` on the
+      // handle is the only reader; the deprecated service-level reader is absent
+      // so a regression that reaches for it fails loudly.
+      const handle = {
+        stateOf: (session) => {
+          const id = session?.id ?? "unidentified-session";
+          return projectionCells.get(id)?.get(definition.key) ?? definition.init();
+        },
+        readerFor: (session) => () => handle.stateOf(session),
+      };
+      const thenable = () => undefined;
+      thenable.then = (onFulfilled, onRejected) => Promise.resolve(handle).then(onFulfilled, onRejected);
+      thenable.catch = (onRejected) => Promise.resolve(handle).catch(onRejected);
+      return thenable;
     },
     /** Fold one recorded event, the way the real registry drives its units. */
     fold(session, event) {
@@ -999,55 +989,107 @@ test("a cleared numeric field falls back to its default instead of zero", async 
 });
 
 // ---------------------------------------------------------------------------
-// Projection reader across runtime shapes.
+// Projection reader and retry-chain identity.
 //
-// 0.2.2 changed what `register` returns: a disposer before, a thenable yielding a
-// handle after. The service-level `stateOf(session, key)` still works there but
-// logs a deprecation warning on every call, and one read per request failure would
-// flood the log. These tests pin both shapes so neither runtime regresses.
+// DSH 0.2.3 returns one handle from `register`, and the Session format keys one
+// retry chain by (turn, step, provider, policyKey). A new step must therefore
+// start at attempt 1 with a fresh retryId; keeping the earlier identity writes a
+// log the loader later refuses to open (issue #1).
 // ---------------------------------------------------------------------------
 
-test("a handle-returning registry is read through the handle, not the deprecated reader", async () => {
-  // The double throws if the deprecated reader is touched, so passing proves the
-  // plugin switched over.
-  const fake = fakeContext({ modernProjections: true });
+test("the registry handle drives the ladder, and a new step mints a fresh chain", async () => {
+  const fake = fakeContext();
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
 
   const projection = fake.services.get("sessionProjections");
   const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
-  const agent = fakeAgent("modern-1", projection, emit);
+  const agent = fakeAgent("handle-1", projection, emit);
 
-  // Let the registration's thenable settle so the handle is adopted.
-  await new Promise((resolve) => setTimeout(resolve, 10));
-
-  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
-  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
-  assert.equal(
-    await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined),
-    undefined,
-    "the handle-backed ladder still enforces maxAttempts",
+  const pass = (step) => fake.fire(
+    "agent/request-error",
+    { ...failurePayload(), agent, turn: 1, step },
+    async () => undefined,
   );
 
-  agent.session.append("step/start", { turn: 2, step: 1 });
-  assert.deepEqual(
-    await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined),
-    { kind: "retry" },
-    "and still resets per step",
-  );
+  assert.deepEqual(await pass(1), { kind: "retry" });
+  assert.deepEqual(await pass(1), { kind: "retry" });
+  assert.equal(await pass(1), undefined, "the handle-backed ladder still enforces maxAttempts");
+
+  const first = agent.appended.filter((event) => event.type === "llm/retry");
+  assert.equal(first.length, 2);
+  assert.equal(first[0].data.retry, 1);
+  assert.equal(first[1].data.retry, 2);
+  assert.equal(first[0].data.retryId, first[1].data.retryId, "one chain keeps one retryId");
+
+  agent.session.append("step/start", { turn: 1, step: 2 });
+  assert.deepEqual(await pass(2), { kind: "retry" });
+  const next = agent.appended.filter((event) => event.type === "llm/retry").at(-1);
+  assert.equal(next.data.retry, 1, "a new chain starts at attempt 1");
+  assert.equal(next.data.step, 2);
+  assert.notEqual(next.data.retryId, first[0].data.retryId, "and must not reuse the previous chain identity");
   await fake.dispose();
 });
 
-test("a disposer-returning registry keeps using the service reader", async () => {
-  const fake = fakeContext(); // legacy shape, the one 0.2.1-rc.5 ships
-  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
+test("a provider change inside one step starts a new chain", async () => {
+  const fake = fakeContext();
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, jitterRatio: 0 });
 
   const projection = fake.services.get("sessionProjections");
-  const emit = (session, event) => fake.listeners.get("session/event")?.(session, event);
-  const agent = fakeAgent("legacy-1", projection, emit);
+  const agent = fakeAgent("provider-chain", projection);
+  const fire = (provider) => fake.fire(
+    "agent/request-error",
+    { ...failurePayload(), agent, provider },
+    async () => undefined,
+  );
 
-  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
-  assert.deepEqual(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), { kind: "retry" });
-  assert.equal(await fake.fire("agent/request-error", { ...failurePayload(), agent }, async () => undefined), undefined);
+  assert.deepEqual(await fire("alpha"), { kind: "retry" });
+  assert.deepEqual(await fire("beta"), { kind: "retry" });
+  const retries = agent.appended.filter((event) => event.type === "llm/retry");
+  assert.equal(retries[0].data.provider, "alpha");
+  assert.equal(retries[1].data.provider, "beta");
+  assert.equal(retries[1].data.retry, 1, "a new provider is a new policy chain");
+  assert.notEqual(retries[1].data.retryId, retries[0].data.retryId);
+  await fake.dispose();
+});
+
+test("declares its custom settings page so the Settings service does not generate one", () => {
+  const calls = [];
+  const fake = fakeContext({
+    services: {
+      settings: {
+        configure(policy, owner) {
+          calls.push([policy, owner]);
+          return () => {};
+        },
+      },
+    },
+  });
+  plugin.apply(fake.ctx, { log: false });
+
+  assert.equal(calls.length, 1, "the plugin owns its page, so it declares exactly one policy");
+  assert.deepEqual(calls[0][0], { auto: false });
+  assert.equal(calls[0][1], fake.ctx.fiber, "the policy is owned by this plugin's fiber");
+});
+
+test("an unavailable registry still retries, but writes no unprovable retry events", async () => {
+  const fake = fakeContext({ registrationFailure: true });
+  plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2 });
+
+  const agent = fakeAgent("unregistered-1");
+  const fire = () => fake.fire(
+    "agent/request-error",
+    { ...failurePayload(), agent },
+    async () => undefined,
+  );
+
+  assert.deepEqual(await fire(), { kind: "retry" });
+  assert.deepEqual(await fire(), { kind: "retry" });
+  assert.equal(await fire(), undefined, "the local ladder still enforces maxAttempts");
+  assert.equal(
+    agent.appended.filter((event) => event.type === "llm/retry" || event.type === "llm/retry-started").length,
+    0,
+    "without a registered fold there is no provable chain identity, so nothing may enter the session log",
+  );
   await fake.dispose();
 });
 

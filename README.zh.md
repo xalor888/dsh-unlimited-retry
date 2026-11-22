@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-unlimited-retry.svg)](https://www.npmjs.com/package/dsh-unlimited-retry)
 [![license](https://img.shields.io/github/license/xalor888/dsh-unlimited-retry.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-unlimited-retry.svg)](package.json)
-[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--0%20%3C0.3.0--0-8a2be2.svg)](#兼容性)
+[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.3--0%20%3C0.3.0--0-8a2be2.svg)](#兼容性)
 
 DeepSeek Harness（DSH）的**无限模型请求重试**插件，附带一个实时设置面板。
 
@@ -55,7 +55,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 
 ## 为什么要单独做一个插件
 
-DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的预算在每家 provider 适配器的 `retryPolicy` 上。它默认的 `mode: "normal"` 在 `maxRetries`（本构建是 5）之后就把决定权交出去，于是 step 失败、turn 以错误结束、整轮运行终止。`mode: "always"` 确实存在，但它是按 provider 全有全无的，而且没有延迟上限。
+DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的预算在每家 provider 适配器的 `retryPolicy` 上。它默认的 `mode: "normal"` 在 `maxRetries`（本构建是 5）之后就把决定权交出去，于是 step 失败、turn 以错误结束、整轮运行终止。`mode: "always"` 会按该 provider 自己的延迟上限重试这一路上的每个失败，但它仍然是按 provider 全有全无：无法跨路由判断陌生错误码，也没有整轮预算。
 
 本插件在所有恢复层**之后**再加一层。`agent/request-error` 是 waterfall 事件，Cordis 从最外层开始依次调用，所以**最后注册的监听器在最内层**：其他所有恢复先决定，只有没人接手的失败才会落到这里。
 
@@ -107,6 +107,17 @@ DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的
 
 因此被中止或插件卸载取消的重试，会留下一条 `llm/retry` 而没有对应的 `llm/retry-started` —— 这恰好就是事实。`mode` 记为 `always`，`policyKey` 固定为 `unlimited-retry`，不会与 provider 的预算冲突。
 
+## 会话日志安全：一条链，一个身份
+
+Harness 按 `(turn, step, provider, policyKey)` 保存重试链，并拒绝打开违反规则的日志：同一条链只能有一个 `retryId`，尝试号必须从 1 开始连续递增。一个跨 step 沿用身份的插件**写入时不会报错**——它写出的日志要到下次打开会话时才会被拒绝。
+
+4.0.0 修掉了这一类故障（[issue #1](https://github.com/xalor888/dsh-unlimited-retry/issues/1)）：
+
+- 每个新的 step 或 provider 都会以全新 `retryId` 从第 1 次尝试开始；只有坐标完全一致的同一条链才沿用身份。
+- turn 预算仍然跨 step 保留，`maxRetriesPerTurn` 行为不变。
+- 只有已注册的会话投影能证明这条链时才写重试事件。投影不可用时（例如组合里没有 `sessionProjections`），重试照常发生，但不写 `llm/retry` 事件，面板的 capabilities 会报告 `recordSessionEvents: false`。插件**绝不猜**尝试号：猜才是写坏日志的原因。
+- 已被 3.1.0 写坏的会话不会因为升级 4.0.0 自动恢复；4.0.0 只保证新写入是安全的。修复旧文件意味着重写其中的 `llm/retry` 记录，动手前先备份。
+
 ### 设置面板
 
 ![面板顶部：实时状态、计数器，以及标明本插件位置的重试阶梯](assets/screenshot-2.png)
@@ -117,6 +128,7 @@ DSH 自带的 `@deepseek-ai/dsh-llm-retry` 只负责**执行**重试，真正的
 - 📈 **分布**：按错误码、按 provider；另有一栏因错误码被判终止而主动放弃的次数
 - 🕒 **最近重试**：第几次、错误码、provider、延迟、时间（相对显示）
 - ⚙️ **策略编辑**：开关与数字直接经 `configEditor` 写回 profile 补丁层，重启仍生效，并热重载宿主端
+- 🗂️ **插件页也能打开**：在 DSH 0.2.3 上宿主会声明这是它自己的设置页，因此同一块面板也会出现在插件页该 bundle 的行上，不需要维护第二份页面
 - 🏷️ **终止错误码**：逐个添加（带真实错误码下拉建议），或一键套用推荐集合
 - 🧹 **清零计数**：需要一次显式确认
 - 🎨 **主题跟随**：只用 `--dsw-alias-*` 变量，明暗主题与后续换肤自动生效
@@ -278,7 +290,7 @@ dsh-unlimited-retry/
 npm test        # 或 node --test test/
 ```
 
-覆盖重试判定路径（委托、排除、次数上限、provider 延迟、中止、销毁、按 step 重置、1.x 旧配置键）、每个接口（状态码、`HEAD`、准入、请求体校验、未知键、推荐集合、清零确认、失败编辑器）、客户端 bundle（注册、中英键齐平与占位符校验、渲染、错误/空/只读状态、纯变量样式）、包结构（manifest、patch 字段完整性、图标、许可），以及**真实 projection 服务 + 真实 Cordis 分发器的集成测试**。
+覆盖重试判定路径（委托、排除、次数上限、provider 延迟、中止、销毁、按 step 重置、1.x 旧配置键）、每个接口（状态码、`HEAD`、准入、请求体校验、未知键、推荐集合、清零确认、失败编辑器）、客户端 bundle（注册、中英键齐平与占位符校验、渲染、错误/空/只读状态、纯变量样式）、包结构（manifest、patch 字段完整性、图标、许可），以及**真实 projection 服务 + 真实 Cordis 分发器的集成测试**；其中一条用 `session-format-v3-to-v4` 的关系校验器验证「同一 turn 里两个 step 都发生重试」的真实日志。
 
 验证线上挂载（未认证返回 `401` 是正确的——请打开带认证参数的 GUI 看面板）：
 
@@ -291,16 +303,16 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | 依赖 | 要求 |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.1-rc.3、0.2.1-rc.5、0.2.2-alpha.2、0.2.2-rc.1、0.2.2-rc.3 上验证 |
-| 带 `dsh-agent-loop` 与 `dsh-llm-retry` | 是（重试监听器挂在那条事件上） |
+| DSH | **>= 0.2.3-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.3-alpha.1 上验证 |
+| 带 `dsh-agent-loop`、`dsh-llm-retry` 与 `dsh-session-projection` | 是（重试监听器挂在那条事件上，链读取走该投影） |
+| 更早的 DSH | 0.2.0–0.2.2 仍可安装 3.x；4.0.0 刻意不声明兼容它们 |
 
-会话投影读取对宿主先后提供过的两种注册形态都做了适配：0.2.2 之前 `register`
-返回 disposer，0.2.2 起返回**可调用 thenable**（`typeof` 是 `"function"`，但仍带 `then`）。
-有句柄时优先用句柄，因此在已弃用旧读取的运行时上不会走那条路。
+0.2.3 的 `register()` 异步交付一个保留句柄。插件先等句柄到位，再决定能否写重试事件，然后通过 `handle.stateOf(session)` 读取；已弃用的 `ctx.sessionProjections.stateOf(session, key)` 完全不再调用。
 
-`engines.dsh` 的 `-0` 下界是刻意的：宿主的预检用 `includePrerelease: true` 匹配，而只有带预发布标签的边界才能放行 `0.2.1-rc.3` 这样的预发布运行时。写成 `>=0.2.0` 会把所有 `-rc` 版本静默排除。
+`engines.dsh` 的 `-0` 下界是刻意的：宿主的预检用 `includePrerelease: true` 匹配，而只有带预发布标签的边界才能放行 `0.2.3-alpha.1` 这样的预发布运行时。写成 `>=0.2.3` 会把所有预发布版本静默排除。
 - 有 `AbortSignal.any` 就用它，没有则用 controller 方案等价实现。
 - 1.x 的 `config` 仍可挂载：`retryAllCodes` 被忽略（除非显式排除，否则每个码都会重试），`terminalCodes` 按 `excludeCodes` 读取，两者各打一条替代提示。
+- `recordSessionEvents: true` 需要已注册的 `sessionProjections` 服务；没有它时重试照常生效，但重试事件会被跳过而不是靠猜写进日志。
 - Web 面板另需 `configEditor` 与 `settings.section` 槽位；缺这些时策略照常生效，页面只是不存在或只读。
 
 ### 陌生错误码是怎么判断的
@@ -334,6 +346,16 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - **模型**一直挑那个失败的工具 —— 这是 `dsh-repeat-tool-reminder` 负责的事；
 - **MCP 服务**返回错误，在修好之前会一直返回错误；
 - 本插件只决定要不要重发**请求**，而且从 3.0.0 起只对那些「有可能恢复」的错误码这么做。
+
+### 4.0.0
+
+**破坏性变更：要求 DSH >= 0.2.3，并修正重试链的写法。**
+
+- 修复 [issue #1](https://github.com/xalor888/dsh-unlimited-retry/issues/1)：3.1.0 在 step 边界重置了尝试次数却保留了 `retryId`，同一 turn 的第二个 step 复用了别的链的身份。日志之后会打不开（`must keep one retryId per policy chain` / `changes its scheduled coordinates`）。新的链键是 `(turn, step, provider)`。
+- 写入任何持久事件前，必须由已注册的会话投影证明当前链；证明不了时照常重试但不写事件，而不是猜一个尝试号。
+- 读取改用 0.2.3 的保留句柄，投影状态版本升到 3。
+- 声明自有设置页，因此 0.2.3 会在设置对话框和插件页的 bundle 行同时提供这块面板。
+- 已被 3.1.0 写坏的旧会话不会因安装 4.0.0 自动修复；只有新写入是安全的。
 
 ### 3.1.0
 

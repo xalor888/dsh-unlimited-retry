@@ -40,11 +40,31 @@ const CANDIDATES = EXPLICIT === undefined
     ]
   : candidatesFor(EXPLICIT);
 
-const { existsSync } = await import("node:fs");
+const { existsSync, realpathSync } = await import("node:fs");
+const { dirname, join } = await import("node:path");
 const HARNESS = CANDIDATES.find(
   (candidate) => typeof candidate === "string" && candidate.length > 0
     && existsSync(`${candidate}/@deepseek-ai/cordis/lib/index.js`),
 );
+
+/**
+ * Locate the Session format catalog, which the JSONL backend imports but which
+ * is not linked beside every source-install layout. A packaged install exposes
+ * it directly; a source install keeps it beside the JSONL package's real path.
+ * @returns the catalog module path, or undefined when neither layout carries it.
+ */
+function catalogPath() {
+  const direct = `${HARNESS}/@deepseek-ai/dsh-session-format-catalog/lib/index.js`;
+  if (existsSync(direct)) return direct;
+  try {
+    const jsonl = realpathSync(`${HARNESS}/@deepseek-ai/dsh-session-persistence-jsonl`);
+    const sibling = join(dirname(jsonl), "session-format-catalog/lib/index.js");
+    if (existsSync(sibling)) return sibling;
+  } catch {
+    /* no JSONL package in this layout */
+  }
+  return undefined;
+}
 
 process.env.DSH_PROFILE = process.env.DSH_PROFILE ?? "web";
 process.env.DSH_PROFILE_DIR = process.env.DSH_PROFILE_DIR ?? `${process.env.HOME}/.dsh/profiles/web`;
@@ -64,6 +84,15 @@ const { Context } = HARNESS === undefined ? {} : await import(`${HARNESS}/@deeps
 const { default: projectionPlugin } = HARNESS === undefined
   ? {}
   : await import(`${HARNESS}/@deepseek-ai/dsh-session-projection/lib/index.js`);
+const CATALOG = HARNESS === undefined ? undefined : catalogPath();
+const { sessionFormatCatalog } = CATALOG === undefined
+  ? {}
+  : await import(CATALOG);
+/** The V4 relationship test needs the shipped catalog; a layout without it skips. */
+const catalogSkip = CATALOG === undefined
+  ? "no Session format catalog resolvable beside this Harness install"
+  : false;
+const v4Test = (title, fn) => (skip === false && catalogSkip === false ? nodeTest(title, fn) : nodeTest.skip(title, fn));
 
 /**
  * A session double complete enough for the real registry to fold its log.
@@ -153,6 +182,78 @@ it("the ladder dies with its session instead of accumulating per session", async
     assert.deepEqual(action, { kind: "retry" }, `session ${index} retried independently`);
     assert.equal(root.sessionProjections.stateOf(session, "unlimitedRetryChain").attempt, 1);
   }
+});
+
+/**
+ * Reopen a synthetic-but-physical V4 log through the shipped relationship
+ * validator. The log carries the framework rows a retry chain needs around the
+ * plugin's own events; only the plugin events vary between tests.
+ * @param events - the Session events the plugin appended.
+ */
+function validateV4Rows(events) {
+  const rows = [{ type: "turn/start", data: { turn: 1 } }];
+  for (const step of [1, 2]) {
+    rows.push({ type: "step/start", data: { turn: 1, step } });
+    rows.push({
+      type: "request/header",
+      data: { reason: "initial", header: { config: { provider: "mock", model: "mock" } } },
+    });
+    rows.push(...events
+      .filter((event) => (event.type === "llm/retry" || event.type === "llm/retry-started") && event.data?.step === step)
+      .map((event) => ({ type: event.type, data: event.data })));
+    rows.push({ type: "step/end", data: { turn: 1, step } });
+  }
+  rows.push({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+
+  const restore = sessionFormatCatalog.createRestore(
+    { type: "session", version: 4, id: "retry-chain", createdAt: 1, delegationDepth: 0, isSeeded: false },
+    { recovery: "strict", validation: "current" },
+  );
+  for (const [seq, candidate] of rows.entries()) {
+    const event = { ...candidate, seq, time: seq + 1 };
+    restore.decodeRow(JSON.parse(JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(event))));
+  }
+  return restore.finish();
+}
+
+v4Test("two retrying steps in one turn write two valid V4 chains", async () => {
+  const root = await projectionRoot();
+  const app = root.extend();
+  plugin.apply(app, { initialDelayMs: 1, maxDelayMs: 2, maxAttempts: 2, jitterRatio: 0 });
+
+  const session = realishSession("integration-v4-chain");
+  const fire = (step) => app.waterfall(
+    "agent/request-error",
+    {
+      agent: { session },
+      turn: 1,
+      step,
+      provider: "mock",
+      failure: { message: "boom", code: "TRANSPORT" },
+      signal: new AbortController().signal,
+    },
+    async () => undefined,
+  );
+
+  assert.deepEqual(await fire(1), { kind: "retry" });
+  assert.deepEqual(await fire(1), { kind: "retry" });
+  session.append("step/start", { turn: 1, step: 2 });
+  assert.deepEqual(await fire(2), { kind: "retry" });
+
+  const retries = session.events.filter((event) => event.type === "llm/retry");
+  assert.equal(retries.length, 3, "two attempts in step 1 and one in step 2");
+  assert.equal(retries[0].data.retryId, retries[1].data.retryId, "one chain keeps one retryId");
+  assert.notEqual(retries[2].data.retryId, retries[0].data.retryId, "a new step starts a new chain");
+  assert.equal(retries[2].data.retry, 1, "and at attempt 1");
+
+  // The real loader must accept the physical log. This is the assertion 3.1.0
+  // failed after a restart: the validator rejects a chain that reuses an id.
+  assert.doesNotThrow(() => validateV4Rows(session.events));
+
+  const corrupt = session.events.map((event) => event.type.startsWith("llm/retry") && event.data.step === 2
+    ? { ...event, data: { ...event.data, retryId: retries[0].data.retryId } }
+    : event);
+  assert.throws(() => validateV4Rows(corrupt), /retryId per policy chain|scheduled coordinates/);
 });
 
 it("a cancellation is declined through the real dispatcher too", async () => {

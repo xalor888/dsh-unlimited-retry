@@ -1,7 +1,7 @@
 {
   "name": "dsh-unlimited-retry",
-  "version": "3.1.0",
-  "description": "Unbounded model-request retry for the DeepSeek Harness agent loop, with a live Settings panel.",
+  "version": "4.0.0",
+  "description": "Unbounded, chain-correct model-request retry for the DeepSeek Harness agent loop, with a live Settings panel.",
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -44,7 +44,7 @@
   ],
   "engines": {
     "node": ">=20",
-    "dsh": ">=0.2.0-0 <0.3.0-0"
+    "dsh": ">=0.2.3-0 <0.3.0-0"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs"
@@ -71,5 +71,8 @@
         "@deepseek-ai/dsh-client-ui-settings-general"
       ]
     }
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
   }
 }

@@ -7,8 +7,10 @@
  * the budget lives on each provider adapter's `retryPolicy`. Its default
  * `mode: "normal"` stops after `maxRetries` (5 in the shipped composition) and
  * then delegates, so the step fails, the turn closes with an error, and a long
- * unattended run dies on a transient network blip. `mode: "always"` exists, but
- * it is all-or-nothing per provider and cannot be bounded by a delay ceiling.
+ * unattended run dies on a transient network blip. `mode: "always"` exists and
+ * has its own delay ceiling, but it is per provider: it retries every failure of
+ * that route, cannot judge an unfamiliar code across providers, and holds no
+ * turn-wide budget.
  *
  * This plugin registers the INNERMOST listener on `agent/request-error`. That
  * event is a waterfall and Cordis runs listeners outermost-first, so the
@@ -23,11 +25,11 @@
  *
  * Deliberate defaults
  * -------------------
- * No failure code is terminal by default, including auth, quota, billing and
- * context-overflow codes. That is the whole point of an *unlimited* retry
- * plugin, and it is announced once at mount so an unintended infinite loop on a
- * permanent failure is a visible decision rather than a silent spend. Bound it
- * by adding codes to `excludeCodes`, or by setting `maxAttempts`.
+ * Only the failure codes the Harness itself declares retryable are retried by
+ * default (`EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`).
+ * An unfamiliar code is judged by its message, every refusal is listed in the
+ * panel, `retryAllCodes` widens the scope, and `maxRetriesPerTurn` bounds a
+ * fault that survives every step.
  *
  * Durable-event ordering
  * ----------------------
@@ -35,12 +37,18 @@
  * `llm/retry-started` after it, matching `dsh-llm-retry`. The log therefore
  * always shows a wait that actually happened, and a retry abandoned by an abort
  * leaves a `llm/retry` record with no matching `llm/retry-started`.
+ *
+ * The chain belongs to one `(turn, step, provider)`: every new chain mints a
+ * fresh `retryId` and starts at attempt 1, and only the chain that owns the
+ * coordinates may continue it. No event is written unless the registered session
+ * projection proves the chain: a guessed attempt number can make the stored
+ * Session permanently unreadable (issue #1).
  */
 
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "3.1.0";
+const PLUGIN_VERSION = "4.0.0";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -384,7 +392,19 @@ async function loadConfigSchema() {
  * @returns the imported namespace, or undefined when it cannot be resolved.
  */
 async function importFromProfile(specifier) {
+  // The plugin's own dependency is the first choice: a package installed with
+  // its dependencies resolves the exact version it declares, without depending
+  // on the profile's flattened module tree.
+  try {
+    return await import(specifier);
+  } catch {
+    /* fall through to the Host's copies */
+  }
   const anchors = [
+    // DSH sets this in the shell environment, and its install tree carries both
+    // `zod` and `schemastery`. A profile often carries neither: it depends on the
+    // CLI, not on every Harness package.
+    process.env.DSH_INSTALL_DIR,
     process.env.DSH_PROFILE_DIR,
     process.env.DSH_HOME === undefined ? undefined : `${process.env.DSH_HOME}/profiles/${process.env.DSH_PROFILE ?? "web"}`,
   ].filter((anchor) => typeof anchor === "string" && anchor.length > 0);
@@ -398,11 +418,7 @@ async function importFromProfile(specifier) {
       /* try the next anchor */
     }
   }
-  try {
-    return await import(specifier);
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 /**
@@ -434,12 +450,18 @@ function pathToSpecifier(path) {
 
 
 /**
- * Projection state schema for one retry series.
+ * Projection state schema for the one retry chain this plugin may own.
  *
  * The registry validates a replayed cell with `stateSchema.parse`, so this must
  * be a real zod schema: a hand-rolled `{ parse }` object registers fine and then
- * throws on the first resumed session. Building it once at module scope keeps
- * `apply()` synchronous and avoids per-mount construction.
+ * throws on the first resumed session. Building it once at module scope avoids
+ * per-mount construction.
+ *
+ * The Session format validates one chain per `(turn, step, provider, policyKey)`
+ * and requires one stable retryId inside it. The state therefore carries the
+ * exact coordinates that own the current identity, not only its attempt count:
+ * a different step or provider is a new chain and must start at attempt 1 with
+ * a fresh retryId.
  */
 const CHAIN_SCHEMA = await (async () => {
   const zod = await importZod();
@@ -448,6 +470,8 @@ const CHAIN_SCHEMA = await (async () => {
     attempt: zod.z.number().int().nonnegative().default(0),
     retryId: zod.z.string().optional(),
     turn: zod.z.number().int().nonnegative().optional(),
+    step: zod.z.number().int().nonnegative().optional(),
+    provider: zod.z.string().optional(),
     // Retries already spent inside the current turn, across all its steps.
     turnAttempts: zod.z.number().int().nonnegative().default(0),
   });
@@ -976,84 +1000,129 @@ export function apply(ctx, config) {
   // ---------------------------------------------------------------------
   const CHAIN_KEY = "unlimitedRetryChain";
 
-  /** One retry series; see `CHAIN_SCHEMA` for why it is a real zod schema. */
-
-  /** Boundaries that end the request series owning a ladder. */
-  // Boundaries that end the *step* ladder. A turn boundary resets the turn
+  // Boundaries that end the *step* chain. A turn boundary resets the turn
   // budget too; a step boundary must not, or the ceiling would be per-step and
   // a turn could still loop across steps.
   const STEP_RESETS = new Set(["step/start", "assistant/message"]);
   const TURN_RESETS = new Set(["turn/start", "turn/end"]);
   const CHAIN_RESETS = new Set([...STEP_RESETS, ...TURN_RESETS]);
-  const EMPTY_CHAIN = Object.freeze({ attempt: 0, retryId: undefined, turn: undefined, turnAttempts: 0 });
+  const EMPTY_CHAIN = Object.freeze({
+    attempt: 0,
+    retryId: undefined,
+    turn: undefined,
+    step: undefined,
+    provider: undefined,
+    turnAttempts: 0,
+  });
 
-  let chainsRegistered = false;
   /**
-   * A 0.2.2+ registration handle, whose `stateOf(session)` is the supported reader.
-   * Absent on runtimes whose `register` returns a disposer; there the service-level
-   * `stateOf(session, key)` is the only reader, and it is not yet deprecated.
+   * Whether the projection handle drives the chain.
+   *
+   * From DSH 0.2.3 the registry returns a handle after an asynchronous
+   * registration; that handle's `stateOf` is the only supported reader. The
+   * bounded map stays in charge when registration is unavailable, and is used
+   * only to count attempts that are not written to the session log.
    */
+  let chainsRegistered = false;
+  /** Why durable recording is on, off, or waiting; surfaced in the panel. */
+  let projectionStatus = !cfg.recordSessionEvents
+    ? "disabled-by-config"
+    : CHAIN_SCHEMA === undefined ? "no-zod-schema" : "pending";
+  let projectionError;
+  /** The retained reader of the registered fold; undefined until registration settles. */
   let chainHandle;
+  /**
+   * Resolves true once the registered fold can prove a chain.
+   *
+   * Registration returns a handle asynchronously, and a durable retry event that
+   * guessed its attempt number before the handle arrived would corrupt the log.
+   * Recovery therefore awaits this before deciding whether it may write.
+   */
+  let projectionReady = Promise.resolve(false);
   if (cfg.recordSessionEvents && CHAIN_SCHEMA !== undefined) {
+    // Optional service: a composition without projections still retries. Read
+    // it through `get` (the same optional-access path the Web routes use) so
+    // this plugin mounts without declaring a hard dependency on the registry.
+    let projectionRegistry;
     try {
-      const registered = ctx.sessionProjections.register({
-        key: CHAIN_KEY,
-        stateVersion: 2,
-        stateSchema: CHAIN_SCHEMA,
-        init: () => EMPTY_CHAIN,
-        apply: (state, event) => {
-          const type = event?.type;
-          if (typeof type !== "string") return state;
-          if (TURN_RESETS.has(type)) {
-            return state.attempt === 0 && (state.turnAttempts ?? 0) === 0 ? state : EMPTY_CHAIN;
-          }
-          if (STEP_RESETS.has(type)) {
-            return state.attempt === 0 ? state : { ...state, attempt: 0 };
-          }
-          if (type !== "llm/retry") return state;
-          // Only this plugin's own retries own this ladder.
-          if (event.data?.policyKey !== POLICY_KEY) return state;
-          const attempt = Number.isSafeInteger(event.data?.retry) && event.data.retry > 0 ? event.data.retry : 0;
-          if (attempt === 0) return state;
-          const retryId = typeof event.data?.retryId === "string" ? event.data.retryId : state.retryId;
-          if (attempt === state.attempt && retryId === state.retryId) return state;
-          const turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : state.turn;
-          const sameTurn = turn !== undefined && turn === state.turn;
-          return {
-            attempt,
-            retryId,
-            turn,
-            turnAttempts: (sameTurn ? (state.turnAttempts ?? 0) : 0) + 1,
-          };
-        },
-      });
-      chainsRegistered = true;
-      // The two runtimes differ only in what `register` returns: a plain disposer
-      // before 0.2.2, and from 0.2.2 a *callable thenable* — upstream's own README
-      // says `typeof` is "function" and `instanceof Promise` is false. A check for
-      // an object misses it and leaves every read on the deprecated service reader,
-      // so this test intentionally accepts a function that carries `then`.
-      //
-      // Deliberately not an async `apply`: upstream's guidance for new plugins is
-      // to await registration, but this plugin's routes and mount probe are
-      // registered synchronously and its reader is served from a listener that can
-      // fire at any time. Definitions install synchronously anyway, and the handle
-      // lands on a microtask, so resolving it here keeps `apply` sync without ever
-      // reading stale state.
-      if (registered !== null && (typeof registered === "object" || typeof registered === "function")
-        && typeof registered.then === "function") {
-        Promise.resolve(registered).then(
+      projectionRegistry = typeof ctx.get === "function"
+        ? ctx.get("sessionProjections")
+        : ctx.sessionProjections;
+    } catch {
+      projectionRegistry = undefined;
+    }
+    if (typeof projectionRegistry?.register !== "function") {
+      projectionStatus = "service-absent";
+      log("warn", "sessionProjections is not mounted; retries continue without durable retry events");
+    } else {
+      try {
+        const registered = projectionRegistry.register({
+          key: CHAIN_KEY,
+          // The chain coordinates are new state, and the step fold now drops the
+          // retry identity instead of keeping it, so a 2 cell cannot seed this one.
+          stateVersion: 3,
+          stateSchema: CHAIN_SCHEMA,
+          init: () => EMPTY_CHAIN,
+          apply: (state, event) => {
+            const type = event?.type;
+            if (typeof type !== "string") return state;
+            if (TURN_RESETS.has(type)) return EMPTY_CHAIN;
+            if (STEP_RESETS.has(type)) {
+              // The Session format owns one retryId per (turn, step, provider)
+              // chain. A step boundary ends that chain, so its attempt count AND
+              // its identity die here; only the turn budget survives.
+              if (state.attempt === 0 && state.retryId === undefined
+                && state.step === undefined && state.provider === undefined) return state;
+              return { ...state, attempt: 0, retryId: undefined, step: undefined, provider: undefined };
+            }
+            if (type !== "llm/retry") return state;
+            // Only this plugin's own retries own this chain.
+            if (event.data?.policyKey !== POLICY_KEY) return state;
+            const attempt = Number.isSafeInteger(event.data?.retry) && event.data.retry > 0 ? event.data.retry : 0;
+            const turn = Number.isSafeInteger(event.data?.turn) && event.data.turn > 0 ? event.data.turn : undefined;
+            const step = Number.isSafeInteger(event.data?.step) && event.data.step > 0 ? event.data.step : undefined;
+            const provider = nonEmptyString(event.data?.provider);
+            const retryId = nonEmptyString(event.data?.retryId);
+            if (attempt === 0 || turn === undefined || step === undefined
+              || provider === undefined || retryId === undefined) return state;
+            const sameChain = turn === state.turn && step === state.step && provider === state.provider;
+            if (sameChain && attempt === state.attempt && retryId === state.retryId) return state;
+            const sameTurn = turn === state.turn;
+            return {
+              attempt,
+              retryId,
+              turn,
+              step,
+              provider,
+              turnAttempts: (sameTurn ? (state.turnAttempts ?? 0) : 0) + 1,
+            };
+          },
+        });
+        projectionReady = Promise.resolve(registered).then(
           (handle) => {
-            if (handle !== null && typeof handle === "object" && typeof handle.stateOf === "function") chainHandle = handle;
+            if (handle === null || typeof handle !== "object" || typeof handle.stateOf !== "function") {
+              projectionStatus = "no-handle";
+              projectionError = "registration returned no reader";
+              log("warn", "session projection registration returned no reader; retries continue without durable retry events");
+              return false;
+            }
+            chainHandle = handle;
+            chainsRegistered = true;
+            projectionStatus = "registered";
+            return true;
           },
           (error) => {
-            chainsRegistered = false;
-            log("warn", `session projection registration failed (${String(error)}); retry ladders are bounded and process-local instead`);
+            projectionStatus = "unavailable";
+            projectionError = String(error);
+            log("warn", `session projection registration failed (${String(error)}); retries continue without durable retry events`);
+            return false;
           },
         );
+      } catch (error) {
+        projectionStatus = "register-failed";
+        projectionError = String(error);
+        log("warn", `session projections unavailable (${String(error)}); retries continue without durable retry events`);
       }
-    } catch (error) {
-      log("warn", `session projections unavailable (${String(error)}); retry ladders are bounded and process-local instead`);
     }
   }
 
@@ -1076,11 +1145,11 @@ export function apply(ctx, config) {
       const id = session?.id ?? "unidentified-session";
       const current = fallbackChains.get(id);
       if (current === undefined) return;
-      // A step boundary ends the step ladder but must keep the turn budget; a
-      // turn boundary ends both.
+      // A step boundary ends the chain's identity but must keep the turn budget;
+      // a turn boundary ends both.
       fallbackChains.set(id, TURN_RESETS.has(type)
         ? EMPTY_CHAIN
-        : { ...current, attempt: 0 });
+        : { ...current, attempt: 0, retryId: undefined, step: undefined, provider: undefined });
     });
   }
 
@@ -1095,61 +1164,61 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Read the ladder for one session.
-   * @param session - the session that owns the ladder.
-   * @returns the attempts already made in this series, and its identity.
+   * Read the chain that owns one session's current request series.
+   * @param session - the session that owns the chain.
+   * @returns the chain state, or undefined when a registered fold cannot prove it.
    */
   function chainFor(session) {
     if (chainsRegistered) {
       try {
-        // Prefer the handle, which is the supported reader from 0.2.2 on; the
-        // service reader is deprecated there. The handle resolves on a microtask,
-        // so no recorded event can arrive before it is adopted — measured on
-        // 0.2.2-alpha.2: zero deprecation warnings across a full ladder.
-        if (chainHandle !== undefined) return chainHandle.stateOf(session) ?? EMPTY_CHAIN;
-        return ctx.sessionProjections.stateOf(session, CHAIN_KEY) ?? EMPTY_CHAIN;
+        const state = chainHandle?.stateOf(session);
+        if (state !== null && typeof state === "object") return state;
       } catch (error) {
-        // Reading a projection needs a real session (the registry folds its log
-        // to materialize the cell). A submission that reached this listener with
-        // something session-shaped but not a session must still get a retry, so
-        // fall through to the bounded store and say why, once.
+        // A registered unit that cannot answer leaves no provable identity. Do not
+        // guess one from an empty local map: a wrong attempt number or a reused
+        // retryId corrupts the stored log permanently. Leave this attempt to the
+        // loop instead, and say why once.
         if (!projectionReadFailed) {
           projectionReadFailed = true;
-          log("warn", `cannot read the retry ladder from this session (${String(error)}); using the bounded local ladder`);
+          log(
+            "warn",
+            `cannot read the retry chain from this session (${String(error)}); `
+              + `this attempt is left to the loop instead of written without a provable identity`,
+          );
         }
       }
+      return undefined;
     }
     const id = session?.id ?? "unidentified-session";
     return fallbackChains.get(id) ?? EMPTY_CHAIN;
   }
 
   /**
-   * Record that one attempt is being scheduled.
+   * Record one scheduled attempt in the bounded local map.
+   *
+   * This runs only when the session log will not fold the attempt: the projection
+   * is absent, or this mount is not writing durable events at all.
    * @param session - the owning session.
    * @param attempt - the attempt number being scheduled.
    * @param retryId - the identity shared by the retry's two durable events.
    * @param turn - the turn this attempt belongs to, for the turn ceiling.
-   * @param session - the owning session.
-   * @param attempt - the attempt number being scheduled.
-   * @param retryId - the series identity.
+   * @param step - the step owning the chain.
+   * @param provider - the provider owning the chain.
    */
-  function rememberChain(session, attempt, retryId, turn) {
-    if (chainsRegistered) {
-      // The projection folds the `llm/retry` event appended by `backoff()`;
-      // nothing else may write here.
-      return;
-    }
+  function rememberChain(session, attempt, retryId, turn, step, provider) {
     const id = session?.id ?? "unidentified-session";
     if (fallbackChains.size >= FALLBACK_LIMIT && !fallbackChains.has(id)) {
       const oldest = fallbackChains.keys().next().value;
       if (oldest !== undefined) fallbackChains.delete(oldest);
     }
     const previous = fallbackChains.get(id);
-    const sameTurn = previous?.turn !== undefined && previous.turn === turn;
+    const sameTurn = previous?.turn !== undefined && turn !== undefined && previous.turn === turn;
     fallbackChains.set(id, {
       attempt,
       retryId,
       turn,
+      step,
+      provider,
       turnAttempts: (sameTurn ? previous.turnAttempts ?? 0 : 0) + 1,
     });
   }
@@ -1184,6 +1253,14 @@ export function apply(ctx, config) {
         unlimited: cfg.maxAttempts === null,
         retriesEveryCode: cfg.excludeCodes.size === 0,
         canWriteConfig: typeof ctx.get?.("configEditor")?.edit === "function",
+        // Durable events need a registered projection: without a provable
+        // chain identity the plugin retries but writes nothing, so a stale
+        // panel must not claim the chat surface will show this retry.
+        recordSessionEvents: cfg.recordSessionEvents && chainsRegistered,
+        // A panel must be able to distinguish "off by choice" from "the
+        // projection could not register"; both suppress the chat retry chain.
+        sessionProjection: projectionStatus,
+        sessionProjectionError: projectionError,
       },
       ladder: ladder(),
       recommendedExclude: [...RECOMMENDED_EXCLUDE],
@@ -1220,8 +1297,8 @@ export function apply(ctx, config) {
     };
   }
 
-  /** One attempted schedule: record durably, count, wait, then confirm. */
-  async function backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal) {
+  /** One attempted schedule: record durably when provable, count, wait, then confirm. */
+  async function backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal, recordEvents) {
     const fused = fuseSignals([signal, lifetime.signal]);
     if (fused.signal.aborted) {
       fused.release();
@@ -1231,19 +1308,21 @@ export function apply(ctx, config) {
     const route = nonEmptyString(provider) ?? "unknown";
 
     // Durable BEFORE the wait, so the log shows a wait that really happened.
-    record(agent, "llm/retry", {
-      retryId,
-      turn: turn ?? 0,
-      step: step ?? 0,
-      provider: route,
-      // mode "always" carries no maxRetries, so the chat surface renders the
-      // budget as unbounded even when this plugin caps attempts per step.
-      mode: "always",
-      policyKey: POLICY_KEY,
-      retry: attempt,
-      delayMs,
-      failure: normalizeFailure(failure),
-    });
+    if (recordEvents) {
+      record(agent, "llm/retry", {
+        retryId,
+        turn,
+        step,
+        provider: route,
+        // mode "always" carries no maxRetries, so the chat surface renders the
+        // budget as unbounded even when this plugin caps attempts per step.
+        mode: "always",
+        policyKey: POLICY_KEY,
+        retry: attempt,
+        delayMs,
+        failure: normalizeFailure(failure),
+      });
+    }
 
     const sessionKey = session?.id ?? "unidentified-session";
     activeSessions.set(sessionKey, (activeSessions.get(sessionKey) ?? 0) + 1);
@@ -1270,12 +1349,14 @@ export function apply(ctx, config) {
     fused.release();
     if (!completed || fused.signal.aborted) return false;
 
-    record(agent, "llm/retry-started", {
-      retryId,
-      turn: turn ?? 0,
-      step: step ?? 0,
-      retry: attempt,
-    });
+    if (recordEvents) {
+      record(agent, "llm/retry-started", {
+        retryId,
+        turn,
+        step,
+        retry: attempt,
+      });
+    }
     return true;
   }
 
@@ -1358,14 +1439,40 @@ export function apply(ctx, config) {
       );
     }
 
+    // A durable retry chain is addressed by (turn, step, provider, policyKey).
+    // The Session format requires one retryId inside a chain, a fresh id in every
+    // new chain, and attempt 1 there. Reusing an identity across steps, or starting
+    // a new chain at attempt 2, makes the stored log permanently unreadable
+    // (issue #1); so only the exact coordinates that own the chain may continue it.
+    const coordinatesValid = Number.isSafeInteger(turn) && turn > 0
+      && Number.isSafeInteger(step) && step > 0
+      && typeof provider === "string" && provider.length > 0;
+    // Registration delivers its handle on a microtask; a failure can arrive in
+    // the same tick as the first mount. Await readiness so an event never guesses
+    // its attempt number before the registered fold can prove the chain.
+    const durable = cfg.recordSessionEvents ? await projectionReady : false;
+    if (durable && !coordinatesValid) {
+      return decline(
+        "unprovable-chain",
+        "the loop did not report turn, step and provider for this failure; a retry event cannot be written without corrupting the session log",
+      );
+    }
+
     // The ladder is keyed by the session, never by the agent object: the session
     // is created before the agent that owns it, and the agent itself carries no
-    // `id`. `chainFor` falls back to a single shared key when a session is
-    // missing, so a malformed submission cannot mint a fresh ladder per call and
-    // thereby escape `maxAttempts`.
+    // `id`. `chainFor` returns undefined when a registered fold cannot prove the
+    // chain, so that case delegates rather than minting a fresh ladder per call.
     const session = agent?.session;
     const chain = chainFor(session);
-    const attempt = chain.attempt + 1;
+    if (chain === undefined) {
+      bump(stats.terminalSeen, code);
+      log("warn", `retry chain is unreadable for "${code}"; left to the loop`);
+      return downstream;
+    }
+
+    const sameChain = chain.attempt > 0
+      && chain.turn === turn && chain.step === step && chain.provider === provider;
+    const attempt = sameChain ? chain.attempt + 1 : 1;
     if (cfg.maxAttempts !== null && attempt > cfg.maxAttempts) {
       log("warn", `attempt limit ${cfg.maxAttempts} reached for "${code}"; left to the loop`);
       return downstream;
@@ -1387,8 +1494,10 @@ export function apply(ctx, config) {
       }
     }
 
-    // One identity per retry series, so the two durable events pair up.
-    const retryId = chain.retryId ?? newRetryId();
+    // One identity per retry chain, so the two durable events pair up. A new
+    // chain always mints one; only the chain that owns the coordinates continues
+    // with the recorded identity.
+    const retryId = sameChain && chain.retryId !== undefined ? chain.retryId : newRetryId();
 
     let delayMs = localDelay(cfg, attempt, Math.random);
     const retryAfter = failure?.providerRetryAfterMs;
@@ -1396,10 +1505,13 @@ export function apply(ctx, config) {
       delayMs = Math.min(Math.max(1, Math.round(retryAfter)), cfg.maxDelayMs);
     }
 
-    // Record before waiting: a wait that is cancelled must still be visible, and
-    // when the ladder is projection-folded this append IS the state update.
-    rememberChain(session, attempt, retryId, turn);
-    if (!(await backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal))) {
+    // Count locally when no event will fold the attempt: durable recording is
+    // off, or the projection is unavailable. When an event is written, the fold
+    // it causes IS the state update.
+    if (!durable || !coordinatesValid) {
+      rememberChain(session, attempt, retryId, turn, step, provider);
+    }
+    if (!(await backoff(agent, turn, step, provider, failure, attempt, retryId, delayMs, session, signal, durable && coordinatesValid))) {
       return downstream;
     }
     return { kind: "retry" };
@@ -1592,6 +1704,24 @@ export function apply(ctx, config) {
       ctx.inject(["webServer"], mountRoutes);
     } catch {
       /* no Web server in this composition */
+    }
+  }
+
+  // The Settings service derives a form page for every active Loader entry.
+  // This plugin ships its own panel, so declare that page instead of letting a
+  // generated form compete with it. The Settings/Plugins surfaces then render
+  // `settings.section` on the bundle row, which is the 0.2.3 behavior this
+  // plugin targets.
+  if (typeof ctx.inject === "function" && ctx.fiber !== undefined) {
+    try {
+      ctx.inject(["settings"], (settingsCtx) => {
+        settingsCtx.effect(
+          () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
+          "unlimited-retry: custom settings page",
+        );
+      });
+    } catch (error) {
+      log("warn", `could not declare the custom settings page (${String(error)})`);
     }
   }
 

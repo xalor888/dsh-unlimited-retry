@@ -173,12 +173,18 @@ test("the manifest declares the DSH range the host enforces", async () => {
   const semver = (await import("node:module")).createRequire(import.meta.url)("semver");
   // The tested runtime, and its prerelease form, must both satisfy the range.
   // A lower bound without `-0` silently excludes every prerelease build.
-  for (const runtime of ["0.2.0", "0.2.1-rc.3"]) {
+  for (const runtime of ["0.2.3", "0.2.3-alpha.1"]) {
     assert.ok(
       semver.satisfies(runtime, range, { includePrerelease: true }),
       `${runtime} must satisfy engines.dsh ${range}`,
     );
   }
+  // 4.0.0 targets the 0.2.3 projection-handle and Session-format contracts; the
+  // earlier releases must not be claimed as compatible.
+  assert.ok(
+    !semver.satisfies("0.2.2-rc.5", range, { includePrerelease: true }),
+    "0.2.2 must be outside engines.dsh after the chain-correctness rewrite",
+  );
   // A future major must not be silently claimed.
   assert.ok(!semver.satisfies("0.3.0", range, { includePrerelease: true }));
 });

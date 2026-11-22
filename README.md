@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-unlimited-retry.svg)](https://www.npmjs.com/package/dsh-unlimited-retry)
 [![license](https://img.shields.io/github/license/xalor888/dsh-unlimited-retry.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/dsh-unlimited-retry.svg)](package.json)
-[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--0%20%3C0.3.0--0-8a2be2.svg)](#compatibility)
+[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.3--0%20%3C0.3.0--0-8a2be2.svg)](#compatibility)
 
 Unbounded model-request retry for the DeepSeek Harness agent loop, with a live
 Settings panel.
@@ -73,8 +73,9 @@ DSH ships `@deepseek-ai/dsh-llm-retry`, but it only *executes* retries — the
 budget lives on each provider adapter's `retryPolicy`. Its default
 `mode: "normal"` gives up after `maxRetries` (5 in this build) and then
 delegates, so the step fails, the turn closes with an error, and the run ends.
-`mode: "always"` exists but is all-or-nothing per provider and has no delay
-ceiling.
+`mode: "always"` retries every failure on one provider route under its own delay
+ceiling, but it is still per provider: it cannot judge an unfamiliar code across
+routes and holds no turn-wide budget.
 
 This plugin adds a layer *behind* all of them. `agent/request-error` is a
 waterfall event and Cordis runs listeners outermost-first, so the
@@ -137,6 +138,30 @@ record with no matching `llm/retry-started`, which is exactly what happened.
 `mode` is recorded as `always`, and `policyKey` is the fixed namespace
 `unlimited-retry`, which cannot collide with a provider budget.
 
+## Session-log safety: one chain, one identity
+
+The Harness stores retry chains by `(turn, step, provider, policyKey)` and refuses
+to open a log that breaks the rule: one `retryId` per chain, attempt numbers
+starting at 1 and increasing by one. A plugin that carries one identity across
+steps does not fail at write time — it writes a log that is only rejected the
+next time the session is opened.
+
+4.0.0 fixes that class of failure ([issue #1](https://github.com/xalor888/dsh-unlimited-retry/issues/1)):
+
+- Every new step or provider starts a new chain at attempt 1 with a fresh
+  `retryId`; only the exact chain that owns the coordinates continues its
+  identity.
+- The turn budget still survives step boundaries, so `maxRetriesPerTurn` is
+  unchanged.
+- A retry event is written only when a registered session projection proves the
+  chain. If the projection is unavailable (for example a composition without
+  `sessionProjections`), retries still run but no `llm/retry` events are written,
+  and the panel reports `recordSessionEvents: false` under capabilities. The plugin
+  never guesses an attempt number: guessing is what corrupts a log.
+- Sessions already damaged by 3.1.0 stay damaged; 4.0.0 prevents new damage.
+  Repairing an existing file means rewriting its `llm/retry` records; back the
+  file up first.
+
 ### Settings panel
 
 ![The top of the panel: live status, counters, and the ladder showing where this plugin sits](assets/screenshot-2.png)
@@ -147,6 +172,7 @@ record with no matching `llm/retry-started`, which is exactly what happened.
 - 📈 **Breakdown**: retries per failure code and per provider, plus the failures declined because their code is terminal
 - 🕒 **Recent retries**: attempt, code, provider, delay, and when, with relative times
 - ⚙️ **Policy editor**: switches and numbers write straight back to the profile patch layer through the Harness `configEditor`, surviving a restart and hot-reloading the host half
+- 🗂️ **Also on the Plugins page**: on DSH 0.2.3 the host declares its own settings page, so the same panel is offered on this bundle's row in Plugins without a second copy
 - 🏷️ **Terminal codes**: add one at a time (with suggestions from the real Harness vocabulary), or apply the recommended set in one click
 - 🧹 **Reset counters**: behind an explicit confirmation
 - 🎨 **Theme-driven**: only `--dsw-alias-*` tokens, so light/dark and future rethemes follow automatically
@@ -359,7 +385,8 @@ reset confirmation, a failing editor), the client bundle (registration, i18n
 parity and placeholder parity, rendering, error/empty/read-only states,
 token-only styling), the package shape (manifest, patch completeness, icon,
 license), and **integration tests against the real projection service and the
-real Cordis dispatcher**.
+real Cordis dispatcher**, including a `session-format-v3-to-v4` relationship
+validation of a log where two steps in one turn both retry.
 
 To verify a live mount (an unauthenticated `401` there is correct — open the
 authenticated GUI URL and read the panel):
@@ -373,21 +400,22 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | Requirement | Value |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.0-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.1-rc.3, 0.2.1-rc.5, 0.2.2-alpha.2, 0.2.2-rc.1 and 0.2.2-rc.3 |
-| Ships `dsh-agent-loop` and `dsh-llm-retry` | Yes — the retry listener hangs off that event |
+| DSH | **>= 0.2.3-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.3-alpha.1 |
+| Ships `dsh-agent-loop`, `dsh-llm-retry` and `dsh-session-projection` | Yes — the retry listener hangs off that event, and the chain reader is that projection |
+| Older DSH | 3.x remains installable for 0.2.0–0.2.2; 4.0.0 deliberately does not claim them |
 
-The session-projection reader adapts to both registration shapes the Host has
-shipped: the disposer returned before 0.2.2, and the callable thenable returned
-from 0.2.2 on, whose `typeof` is `"function"` while it still carries `then`.
-The handle is preferred where it exists, so no deprecated read is performed on a
-runtime that deprecated it.
+`register()` on 0.2.3 delivers a retention handle asynchronously. The plugin
+awaits that handle before deciding whether a retry event may be written, then
+reads `handle.stateOf(session)`. The deprecated
+`ctx.sessionProjections.stateOf(session, key)` is never called.
 
 The `-0` lower bound in `engines.dsh` is deliberate: the host matches with
 `includePrerelease: true`, and only a boundary carrying a prerelease tag admits a
-prerelease runtime such as `0.2.1-rc.3`. A plain `>=0.2.0` would silently exclude
-every `-rc` build.
+prerelease runtime such as `0.2.3-alpha.1`. A plain `>=0.2.3` would silently
+exclude every prerelease build.
 - `AbortSignal.any` is used when present; a controller-based fallback covers runtimes without it.
 - A 1.x `config` still mounts: `retryAllCodes` is ignored and `terminalCodes` is read as `excludeCodes`, each with a one-line warning naming the replacement.
+- `recordSessionEvents: true` needs a registered `sessionProjections` service. Without one the retries still apply, but the durable events are skipped rather than guessed.
 - The Web panel additionally needs `configEditor` and the `settings.section` slot. Without them the policy still applies; the page is simply absent or read-only.
 
 ### How an unfamiliar code is judged
@@ -441,6 +469,26 @@ model or to the tool, not to this plugin:
 - an **MCP server** that returns errors will keep returning them until it is fixed;
 - this plugin only decides whether to re-send the *request*, and since 3.0.0 it only
   does so for codes that can plausibly recover.
+
+### 4.0.0
+
+**Breaking: DSH >= 0.2.3, and retry chains are written correctly.**
+
+- Fixed [issue #1](https://github.com/xalor888/dsh-unlimited-retry/issues/1):
+  3.1.0 reset the attempt count at a step boundary but kept its `retryId`, so a
+  second step in the same turn reused an identity the Session format reserves for
+  another chain. The stored log then failed to open (`must keep one retryId per
+  policy chain` / `changes its scheduled coordinates`). The new chain key is
+  `(turn, step, provider)`.
+- A registered session projection now proves the chain before any durable event
+  is written; when it cannot, the plugin retries without events instead of
+  guessing an attempt number.
+- Uses the 0.2.3 retention handle for reads, and bumps the projection state
+  version to 3.
+- Declares its own settings page, so 0.2.3 offers it in Settings and on the
+  bundle row in Plugins.
+- Existing sessions already corrupted by 3.1.0 are not repaired by installing
+  4.0.0; only new writes are safe.
 
 ### 3.1.0
 
