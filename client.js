@@ -741,6 +741,7 @@ window.__ModuleLoader__.load({
           maxDelayMs: draft.maxDelayMs,
           jitterRatio: draft.jitterRatio,
           retryWithoutProviderPolicy: draft.retryWithoutProviderPolicy,
+          classifyTransientFailures: draft.classifyTransientFailures,
           retryCodes: draft.retryCodes,
           retryAllCodes: draft.retryAllCodes,
           maxRetriesPerTurn: draft.maxRetriesPerTurn,

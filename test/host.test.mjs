@@ -415,20 +415,19 @@ test("the stats endpoint answers HEAD and rejects other methods", async () => {
   await fake.dispose();
 });
 
-test("config writes are refused when the composition has no admission service", async () => {
+test("every panel route declares the Host-owned browser admission", async () => {
   const routes = new Map();
   const fake = fakeContext({
     services: { webServer: { register: (route) => (routes.set(route.path, route), () => {}) } },
   });
   plugin.apply(fake.ctx, {});
 
-  const response = captureResponse();
-  await routes.get("/unlimited-retry/config").handler(
-    fakeRequest("POST", { "content-type": "application/json" }, JSON.stringify({ autoRetry: false })),
-    response.res,
-  );
-  assert.equal(response.status, 403);
-  assert.equal(JSON.parse(response.text()).code, "not-admitted");
+  // DSH 0.2.3 admits a route before its handler through webserver/authorize.
+  // The handler must not re-check a removed `connection.requestRejection`: doing
+  // that refused every panel write with "no admission service".
+  for (const pathname of ["/unlimited-retry/stats", "/unlimited-retry/config", "/unlimited-retry/reset"]) {
+    assert.equal(routes.get(pathname)?.auth, "required", pathname);
+  }
   await fake.dispose();
 });
 
@@ -439,7 +438,6 @@ test("config writes go through the config editor for an addressable row", async 
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
       configEditor: {
         entries: () => [entry],
         edit: async (target, change) => {
@@ -463,13 +461,58 @@ test("config writes go through the config editor for an addressable row", async 
   await fake.dispose();
 });
 
+test("the panel's whole policy body is validated field by field", async () => {
+  const routes = new Map();
+  let written;
+  const fake = fakeContext({
+    services: {
+      webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
+      configEditor: {
+        entries: () => [{ options: { id: "unlimited-retry" } }],
+        edit: async (_entry, change) => {
+          written = change({}, {});
+        },
+      },
+    },
+  });
+  plugin.apply(fake.ctx, {});
+
+  // This is exactly the body the panel submits. Every key it carries must be
+  // validated and written; a key that is merely known but never built here is
+  // silently dropped, which is how "retry every code" could look applied in the
+  // UI while the Host still ran with its old scope.
+  const body = {
+    autoRetry: true,
+    maxAttempts: null,
+    initialDelayMs: 1000,
+    maxDelayMs: 60000,
+    jitterRatio: 0.2,
+    retryWithoutProviderPolicy: true,
+    classifyTransientFailures: true,
+    retryCodes: ["TRANSPORT", "RATE_LIMIT"],
+    retryAllCodes: true,
+    maxRetriesPerTurn: 18,
+    excludeCodes: [],
+    recordSessionEvents: true,
+  };
+  const response = captureResponse();
+  await routes.get("/unlimited-retry/config").handler(
+    fakeRequest("POST", { "content-type": "application/json" }, JSON.stringify(body)),
+    response.res,
+  );
+  assert.equal(response.status, 200);
+  for (const [key, value] of Object.entries(body)) {
+    assert.deepEqual(written[key], value, `${key} must be written, not ignored`);
+  }
+  await fake.dispose();
+});
+
 test("a config patch with an unknown key is rejected before any write", async () => {
   const routes = new Map();
   let edits = 0;
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
       configEditor: { entries: () => [{ options: { id: "unlimited-retry" } }], edit: async () => { edits += 1; } },
     },
   });
@@ -492,7 +535,6 @@ test("the recommended preset writes the permanent code set", async () => {
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
       configEditor: {
         entries: () => [{ options: { id: "unlimited-retry" } }],
         edit: async (_entry, change) => {
@@ -519,7 +561,6 @@ test("reset clears the counters it is asked to clear", async () => {
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
     },
   });
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
@@ -553,29 +594,11 @@ test("reset clears the counters it is asked to clear", async () => {
   await fake.dispose();
 });
 
-test("a rejected browser request is answered before the handler runs", async () => {
-  const routes = new Map();
-  const fake = fakeContext({
-    services: {
-      webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => 401 },
-    },
-  });
-  plugin.apply(fake.ctx, {});
-
-  const response = captureResponse();
-  routes.get("/unlimited-retry/stats").handler(fakeRequest("GET"), response.res);
-  assert.equal(response.status, 401);
-  assert.equal(JSON.parse(response.text()).code, "unauthenticated");
-  await fake.dispose();
-});
-
 test("non-JSON config bodies are refused with 415", async () => {
   const routes = new Map();
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
     },
   });
   plugin.apply(fake.ctx, {});
@@ -594,7 +617,6 @@ test("an oversized config body is refused with 413", async () => {
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
     },
   });
   plugin.apply(fake.ctx, {});
@@ -902,7 +924,6 @@ test("a failing config editor is reported, not thrown out of the route", async (
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
       configEditor: {
         entries() {
           throw new Error("entries exploded");
@@ -1108,7 +1129,6 @@ function mountingWithStats(config) {
   const fake = fakeContext({
     services: {
       webServer: { register: (route) => (routes.set(route.path, route), () => {}) },
-      connection: { requestRejection: () => undefined },
     },
   });
   plugin.apply(fake.ctx, { log: false, ...config });
@@ -1192,7 +1212,7 @@ test("an adapter code the Harness calls non-retryable is never retried by defaul
 test("an unclassified code is terminal, and the decision is counted", async () => {
   const routes = new Map();
   const fake = fakeContext({
-    services: { webServer: { register: (route) => (routes.set(route.path, route), () => {}) }, connection: { requestRejection: () => undefined } },
+    services: { webServer: { register: (route) => (routes.set(route.path, route), () => {}) } },
   });
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
 
@@ -1324,7 +1344,7 @@ test("context overflow stays terminal however it is spelled", async () => {
 test("every decline records a reason the panel can show", async () => {
   const routes = new Map();
   const fake = fakeContext({
-    services: { webServer: { register: (r) => (routes.set(r.path, r), () => {}) }, connection: { requestRejection: () => undefined } },
+    services: { webServer: { register: (r) => (routes.set(r.path, r), () => {}) } },
   });
   plugin.apply(fake.ctx, { initialDelayMs: 1, maxDelayMs: 2 });
 

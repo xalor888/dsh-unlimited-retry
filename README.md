@@ -352,11 +352,10 @@ The plugin also exports a `Config` schema, so its fields appear in
 
 ## HTTP endpoints
 
-The host half adds three routes. They register through the DSH Web server and
-therefore apply the same browser admission check the rest of the composition
-uses: an unauthenticated browser request gets `401`, an untrusted origin gets
-`403`. Unlike a plain route handler, these do **not** silently bypass the cookie
-gate.
+The host half adds three routes. Each declares `auth: "required"`; DSH 0.2.3's
+WebServer admits it through `webserver/authorize` before the handler runs, so an
+unauthenticated browser request gets `401` and an untrusted origin gets `403`.
+The handler performs no admission check of its own.
 
 | Route | Method | Purpose |
 |---|---|---|
@@ -364,9 +363,8 @@ gate.
 | `/unlimited-retry/config` | `POST` | Validate and persist a policy change |
 | `/unlimited-retry/reset` | `POST` | Clear the counters (`{"confirm": true}` required) |
 
-Writes return `403` when the composition exposes no admission service, and `409`
-when the row is not addressable or there is no `configEditor`. Bodies are capped
-at 8 KiB and must be `application/json`.
+Writes return `409` when the row is not addressable or there is no
+`configEditor`. Bodies are capped at 8 KiB and must be `application/json`.
 
 These routes are a convenience for the panel. **The retry behaviour never
 depends on them**, so a headless / ACP / SDK composition mounts the policy with
@@ -469,6 +467,15 @@ model or to the tool, not to this plugin:
 - an **MCP server** that returns errors will keep returning them until it is fixed;
 - this plugin only decides whether to re-send the *request*, and since 3.0.0 it only
   does so for codes that can plausibly recover.
+
+### 4.0.1
+
+The panel could not write any policy change on DSH 0.2.3: the host returned
+`this composition exposes no browser admission service, so panel writes are
+disabled`. DSH 0.2.3 replaced the old `connection.requestRejection` helper with
+WebServer-owned admission. The routes now declare `auth: "required"` and the
+handler performs no check, so Apply, the recommended preset and Reset work again.
+This also fixes the same refusal on the plugin's own settings page in Plugins.
 
 ### 4.0.0
 

@@ -48,7 +48,7 @@
 /** Cordis function-plugin name; also the Loader row id used by the patch. */
 export const name = "unlimited-retry";
 
-const PLUGIN_VERSION = "4.0.0";
+const PLUGIN_VERSION = "4.0.1";
 const STATS_PATH = "/unlimited-retry/stats";
 const CONFIG_PATH = "/unlimited-retry/config";
 const RESET_PATH = "/unlimited-retry/reset";
@@ -825,7 +825,10 @@ function validateConfigPatch(patch) {
       return { ok: false, status: 400, code: "unknown-key", message: `unknown config key: ${key}` };
     }
   }
-  for (const key of ["autoRetry", "retryWithoutProviderPolicy", "recordSessionEvents", "log"]) {
+  for (const key of [
+    "autoRetry", "retryWithoutProviderPolicy", "classifyTransientFailures",
+    "retryAllCodes", "recordSessionEvents", "log",
+  ]) {
     if (Object.hasOwn(patch, key)) {
       if (typeof patch[key] !== "boolean") return { ok: false, status: 400, code: "invalid-value", message: `${key} must be a boolean` };
       value[key] = patch[key];
@@ -856,6 +859,37 @@ function validateConfigPatch(patch) {
       }
       value.maxAttempts = Math.trunc(parsed);
     }
+  }
+  if (Object.hasOwn(patch, "retryCodes")) {
+    if (!Array.isArray(patch.retryCodes)) {
+      return { ok: false, status: 400, code: "invalid-value", message: "retryCodes must be an array of strings" };
+    }
+    const codes = [];
+    for (const code of patch.retryCodes) {
+      if (typeof code !== "string") return { ok: false, status: 400, code: "invalid-value", message: "retryCodes must contain only strings" };
+      const trimmed = code.trim();
+      if (trimmed.length === 0 || trimmed.length > 120) {
+        return { ok: false, status: 400, code: "invalid-value", message: "each retried code must be 1..120 characters" };
+      }
+      if (!codes.includes(trimmed)) codes.push(trimmed);
+    }
+    value.retryCodes = codes;
+  }
+  if (Object.hasOwn(patch, "maxRetriesPerTurn")) {
+    if (patch.maxRetriesPerTurn === null || patch.maxRetriesPerTurn === 0) value.maxRetriesPerTurn = null;
+    else {
+      const parsed = Number(patch.maxRetriesPerTurn);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10_000) {
+        return { ok: false, status: 400, code: "invalid-value", message: "maxRetriesPerTurn must be null or an integer between 1 and 10000" };
+      }
+      value.maxRetriesPerTurn = Math.trunc(parsed);
+    }
+  }
+  if (Object.hasOwn(patch, "markerFile")) {
+    if (patch.markerFile === null) value.markerFile = null;
+    else if (typeof patch.markerFile !== "string" || patch.markerFile.length === 0 || patch.markerFile.length > 4096) {
+      return { ok: false, status: 400, code: "invalid-value", message: "markerFile must be null or a non-empty absolute path" };
+    } else value.markerFile = patch.markerFile;
   }
   if (patch.resetToRecommendedExcludes === true) {
     value.excludeCodes = [...RECOMMENDED_EXCLUDE];
@@ -1526,43 +1560,6 @@ export function apply(ctx, config) {
   // Web endpoints (optional: absent webServer leaves retry behaviour intact)
   // ---------------------------------------------------------------------
 
-  /**
-   * Reject a browser request that the Harness would not admit on its own.
-   * Route handlers bypass the cookie gate, so a route that reads or writes
-   * plugin state has to apply the same admission the composition uses.
-   * @param webCtx - the context carrying the Web server.
-   * @param req - the incoming request.
-   * @param res - the response, used only when rejecting.
-   * @returns whether the request was already answered.
-   */
-  function rejected(webCtx, req, res, requireAdmission) {
-    let connection;
-    try {
-      connection = webCtx.get("connection");
-    } catch {
-      connection = undefined;
-    }
-    if (typeof connection?.requestRejection !== "function") {
-      if (requireAdmission) {
-        sendJson(res, 403, {
-          code: "not-admitted",
-          message: "this composition exposes no browser admission service, so panel writes are disabled",
-        });
-        return true;
-      }
-      return false;
-    }
-    const rejection = connection.requestRejection(req);
-    if (rejection === undefined) return false;
-    sendJson(res, rejection, {
-      code: rejection === 403 ? "forbidden" : "unauthenticated",
-      message: rejection === 403
-        ? "the request did not come from a trusted origin"
-        : "dsh web authentication required",
-    });
-    return true;
-  }
-
   /** Resolve the addressed Loader row, or undefined when it is not addressable. */
   function configEntry(editor) {
     try {
@@ -1602,15 +1599,20 @@ export function apply(ctx, config) {
    * @param webCtx - a context with the `webServer` service.
    */
   function mountRoutes(webCtx) {
+    // DSH 0.2.3's WebServer owns browser admission: a route defaults to
+    // `required` and the Host's connection services decide it through
+    // `webserver/authorize`. Route handlers receive only admitted requests. The
+    // old manual `connection.requestRejection` check is gone, and with it the
+    // "no admission service" refusal that broke panel writes on a current Host.
     webCtx.effect(() => webCtx.webServer.register({
       kind: "exact",
       path: STATS_PATH,
+      auth: "required",
       handler: (req, res) => {
         if (req.method !== "GET" && req.method !== "HEAD") {
           sendMethodNotAllowed(res, "GET, HEAD");
           return;
         }
-        if (rejected(webCtx, req, res, false)) return;
         let value;
         try {
           value = snapshot();
@@ -1625,12 +1627,12 @@ export function apply(ctx, config) {
     webCtx.effect(() => webCtx.webServer.register({
       kind: "exact",
       path: RESET_PATH,
+      auth: "required",
       handler: async (req, res) => {
         if (req.method !== "POST") {
           sendMethodNotAllowed(res, "POST");
           return;
         }
-        if (rejected(webCtx, req, res, true)) return;
         const body = await readJsonBody(req);
         if (!body.ok) {
           sendJson(res, body.status, { code: body.code, message: body.message });
@@ -1658,12 +1660,12 @@ export function apply(ctx, config) {
     webCtx.effect(() => webCtx.webServer.register({
       kind: "exact",
       path: CONFIG_PATH,
+      auth: "required",
       handler: async (req, res) => {
         if (req.method !== "POST") {
           sendMethodNotAllowed(res, "POST");
           return;
         }
-        if (rejected(webCtx, req, res, true)) return;
         const body = await readJsonBody(req);
         if (!body.ok) {
           sendJson(res, body.status, { code: body.code, message: body.message });

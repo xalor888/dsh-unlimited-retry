@@ -272,7 +272,7 @@ dsh-unlimited-retry/
 
 ## HTTP 接口
 
-宿主端新增三个路由，注册在 DSH Web 服务器上，沿用整个组合一致的浏览器准入检查：未认证的浏览器请求 `401`，来源不可信的请求 `403`。与普通路由处理函数不同，**不会悄悄绕过 cookie 校验**。
+宿主端新增三个路由，每个都声明 `auth: "required"`；DSH 0.2.3 的 WebServer 在进入处理函数前通过 `webserver/authorize` 完成准入，所以未认证的浏览器请求得到 `401`，来源不可信的请求得到 `403`。处理函数自身不再做准入检查。
 
 | 路由 | 方法 | 用途 |
 |---|---|---|
@@ -280,7 +280,7 @@ dsh-unlimited-retry/
 | `/unlimited-retry/config` | `POST` | 校验并持久化一次策略修改 |
 | `/unlimited-retry/reset` | `POST` | 清零计数（必须 `{"confirm": true}`） |
 
-组合里没有准入服务时写操作返回 `403`；行不可寻址或没有 `configEditor` 时返回 `409`。请求体上限 8 KiB，且必须是 `application/json`。
+行不可寻址或没有 `configEditor` 时写操作返回 `409`。请求体上限 8 KiB，且必须是 `application/json`。
 
 这些路由只是给面板用的便利通道。**重试行为本身从不依赖它们**，所以 headless / ACP / SDK 组合只挂策略、完全没有路由。
 
@@ -346,6 +346,14 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 - **模型**一直挑那个失败的工具 —— 这是 `dsh-repeat-tool-reminder` 负责的事；
 - **MCP 服务**返回错误，在修好之前会一直返回错误；
 - 本插件只决定要不要重发**请求**，而且从 3.0.0 起只对那些「有可能恢复」的错误码这么做。
+
+### 4.0.1
+
+在 DSH 0.2.3 上，面板写任何策略都会被宿主拒绝，提示
+`this composition exposes no browser admission service, so panel writes are
+disabled`。0.2.3 用 WebServer 统一准入替换了旧的 `connection.requestRejection`
+检查。现在三个路由都声明 `auth: "required"`，处理函数不再自行检查，Apply、
+推荐终止集和 Reset 都恢复正常；插件页里的同一块设置页也不再被拒。
 
 ### 4.0.0
 
