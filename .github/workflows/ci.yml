@@ -156,7 +156,7 @@ jobs:
             { agent, turn: 1, step: 1, provider: 'p', failure: { message: 'x', code }, signal: new AbortController().signal },
             async () => undefined,
           );
-          const retried = await fire('NETWORK');
+          const retried = await fire('TRANSPORT');
           if (retried?.kind !== 'retry') throw new Error('a transient failure must retry');
           const cancelled = await fire('ABORTED');
           if (cancelled !== undefined) throw new Error('a cancellation must never retry');
