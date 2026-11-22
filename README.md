@@ -398,7 +398,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | Requirement | Value |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.3-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.3-alpha.1 |
+| DSH | **>= 0.2.3-0 < 0.3.0-0** (`engines.dsh`, enforced by the host's compatibility preflight). Verified against 0.2.3-alpha.1 and 0.2.3-alpha.2 |
 | Ships `dsh-agent-loop`, `dsh-llm-retry` and `dsh-session-projection` | Yes — the retry listener hangs off that event, and the chain reader is that projection |
 | Older DSH | 3.x remains installable for 0.2.0–0.2.2; 4.0.0 deliberately does not claim them |
 

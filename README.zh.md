@@ -303,7 +303,7 @@ curl -s http://127.0.0.1:3080/unlimited-retry/stats | head -c 400
 | 依赖 | 要求 |
 |---|---|
 | Node.js | **>= 20** |
-| DSH | **>= 0.2.3-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.3-alpha.1 上验证 |
+| DSH | **>= 0.2.3-0 < 0.3.0-0**（`package.json` 的 `engines.dsh`，由宿主的兼容性预检强制执行）。已在 0.2.3-alpha.1 与 0.2.3-alpha.2 上验证 |
 | 带 `dsh-agent-loop`、`dsh-llm-retry` 与 `dsh-session-projection` | 是（重试监听器挂在那条事件上，链读取走该投影） |
 | 更早的 DSH | 0.2.0–0.2.2 仍可安装 3.x；4.0.0 刻意不声明兼容它们 |
 
